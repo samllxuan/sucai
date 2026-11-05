@@ -140,7 +140,8 @@ class LibraryFilters:
         if self.collected_app.strip():
             clauses.append('''EXISTS (SELECT 1 FROM ad_appearances ax
                 JOIN collection_runs rx ON rx.id=ax.collection_run_id
-                WHERE ax.ad_id=ad_summary.id AND lower(btrim(rx.search_keyword))=%(collected_app)s)''')
+                WHERE ax.ad_id=ad_summary.id AND lower(btrim(rx.search_keyword))=%(collected_app)s
+                AND NOT EXISTS (SELECT 1 FROM collection_excluded_appearances e WHERE e.appearance_id=ax.id))''')
             params['collected_app'] = self.collected_app.strip().lower()
         return " AND ".join(clauses), params
 

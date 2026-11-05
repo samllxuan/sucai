@@ -18,7 +18,9 @@
         <fieldset id="keyword-target" class="collect-target">
           <label class="flabel" for="collect-keyword">App 名称或关键词</label>
           <input class="inp" style="width:100%" id="collect-keyword" name="keyword" value="{{ settings.collect_keyword or '' }}" maxlength="200" placeholder="例如 DramaBox、ReelShort、popiboo" required>
-          <p class="panel-note">搜索 Meta 广告公开文案及主页线索，可能包含同名结果；命中的主页会自动保存，方便继续追踪。</p>
+          <label class="flabel" for="match-mode" style="margin-top:12px">关键词匹配方式</label>
+          <select class="inp" id="match-mode" name="match_mode"><option value="exact"{% if settings.get('collect_match_mode','exact') == 'exact' %} selected{% endif %}>完整短语匹配（适合剧名）</option><option value="broad"{% if settings.get('collect_match_mode') == 'broad' %} selected{% endif %}>宽泛关键词（用于发现线索）</option></select>
+          <p class="panel-note">完整短语模式只保存公开标题、文案或主页名称中能核对到完整关键词的结果；剧名只出现在视频画面时可能漏掉。宽泛模式可能返回无关素材，不代表已核实剧目归属。</p>
         </fieldset>
         <fieldset id="page-target" class="collect-target">
           <div class="collect-pages">

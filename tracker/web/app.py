@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from ..auth import MIN_SECRET_LENGTH, secret_is_usable
 from ..config import get_settings
 from .deps import _STATIC_DIR
-from .routes import admin, ads, auth, collections, collect, export, help, i18n, landing, media, setup, drama_chart, shortdrama_chart
+from .routes import admin, ads, auth, collections, collect, export, help, i18n, landing, media, setup, drama_chart, shortdrama_chart, partner_api
 
 # An internal tool: keep search engines and AI crawlers out. The header covers every
 # response (pages, media, JSON, CSV exports); robots.txt stops compliant bots from
@@ -44,6 +44,8 @@ def create_app() -> FastAPI:
     async def _no_robots(request: Request, call_next):
         response = await call_next(request)
         response.headers["X-Robots-Tag"] = ROBOTS_TAG
+        if request.url.path.startswith('/api/v1/'):
+            response.headers['Cache-Control'] = 'no-store'
         return response
 
     @app.get("/robots.txt", include_in_schema=False)
@@ -52,6 +54,7 @@ def create_app() -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(auth.router)
+    app.include_router(partner_api.router)
     app.include_router(setup.router)
     app.include_router(help.router)
     app.include_router(i18n.router)

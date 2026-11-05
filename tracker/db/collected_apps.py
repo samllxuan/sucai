@@ -19,6 +19,7 @@ def list_collected_apps():
             max(r.started_at) AS last_run_at
           FROM collection_runs r
           LEFT JOIN ad_appearances x ON x.collection_run_id=r.id
+            AND NOT EXISTS (SELECT 1 FROM collection_excluded_appearances e WHERE e.appearance_id=x.id)
           LEFT JOIN ads a ON a.id=x.ad_id AND EXISTS (SELECT 1 FROM creatives cr WHERE cr.ad_id=a.id)
           WHERE r.search_keyword IS NOT NULL AND btrim(r.search_keyword)<>''
           GROUP BY lower(btrim(r.search_keyword))

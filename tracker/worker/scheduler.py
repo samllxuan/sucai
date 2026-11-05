@@ -199,20 +199,22 @@ def _post_collection_steps(step, fail):
     return media
 
 
-def _run_once(trigger: str, resume: int | None = None) -> None:
+def _run_once(trigger: str, resume: int | None = None, settings_override=None):
     """One full run: collect (or, with `resume`, carry on the run of that id through
     Apify that a stopped worker left), link, fetch titles, then close the run. The
     run stays open (and its progress visible in Settings) until every step is done,
     and what goes wrong on the way is counted as an error of the run."""
     if resume is None:
         settings = db.get_app_settings() or {}
+        if settings_override:
+            settings = {**settings, **settings_override}
         configured = bool(settings.get('collect_keyword')) if settings.get('collect_mode') == 'keyword' else bool(db.list_tracked_pages())
         if not configured:
             logger.info('no collection targets configured: waiting for the collection page')
             return
     run_id, progress = None, RunProgress()
     try:
-        run_id, progress = run_collection(trigger=trigger, resume=resume)
+        run_id, progress = run_collection(trigger=trigger, resume=resume, settings_override=settings_override)
     except Exception as exc:  # never kills the loop
         logger.error("collection failed: %s", exc)
         if resume is not None:  # closed with the counters it had
@@ -247,6 +249,27 @@ def _run_once(trigger: str, resume: int | None = None) -> None:
         logger.error("run %s: post-collection steps failed: %s", run_id, exc)
         if run_id is not None:
             _finish_after_failure(run_id, progress, exc)
+    return run_id, progress
+
+
+def _run_partner_job():
+    from ..db import partner_jobs
+    job = partner_jobs.claim()
+    if not job:
+        return False
+    settings = {'collect_mode':'keyword', 'collect_keyword':job['title'],
+                'collect_country':job['country'], 'collect_region':None,
+                'collect_source':'self_hosted', 'collect_match_mode':'exact',
+                'collect_ad_status':'ACTIVE', 'self_hosted_max_ads':30,
+                'collect_launch_days':0, 'collect_sort':'newest'}
+    try:
+        result = _run_once('partner_api', settings_override=settings)
+        run_id, progress = result if result else (None, RunProgress(errors=1))
+        partner_jobs.finish(job['id'], run_id, progress)
+    except Exception:
+        logger.exception('partner collection task failed')
+        partner_jobs.finish(job['id'], None, RunProgress(errors=1))
+    return True
 
 
 def _open_run(trigger: str) -> int | None:
@@ -354,6 +377,8 @@ def main() -> None:
     logger.info("scheduler started (poll every %ds)", POLL_SECONDS)
     # a resumed run stands for the startup run: collecting again would pay twice
     resume = _take_the_lock(lock)
+    from ..db import partner_jobs
+    partner_jobs.recover_interrupted()
     # A click queued while the worker was restarting is this first run, not a
     # second identical collection five seconds after the startup run finishes.
     trigger = "manual" if resume is None and db.consume_collect_now() else "startup"
@@ -378,6 +403,8 @@ def main() -> None:
                 else:
                     logger.info("interval elapsed: starting a scheduled run")
                 _run_once("manual" if collect_now else "schedule")
+                last_run = time.time()
+            elif _run_partner_job():
                 last_run = time.time()
         except Exception as exc:  # a database hiccup must not stop the worker
             logger.error("scheduler: %s", exc)

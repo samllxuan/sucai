@@ -5,6 +5,7 @@ request tokens. No login, challenge solving or personal browser profile.
 """
 import asyncio
 import json
+import re
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urlsplit, unquote
 from ..collection_window import in_launch_window, launch_date
@@ -14,6 +15,21 @@ from ..collection_window import in_launch_window, launch_date
 
 class BrowserSearchError(ValueError):
     pass
+
+
+def matches_exact_phrase(record, query):
+    """Require visible ad text, not search URLs or unrelated request metadata."""
+    from .normalize import from_meta_record
+    def normalized(s):
+        return ' '.join(re.findall(r'[^\W_]+', s.casefold(), flags=re.UNICODE)) if isinstance(s, str) else ''
+    wanted = normalized(query)
+    if not wanted:
+        return False
+    ad = from_meta_record(record)
+    fields = [ad.body, ad.page.name]
+    for creative in ad.creatives:
+        fields.extend([creative.title, creative.body, creative.description, creative.caption])
+    return any((' ' + wanted + ' ') in (' ' + normalized(field) + ' ') for field in fields)
 
 
 def script_payloads(html):
@@ -183,7 +199,8 @@ class MetaBrowser:
             if not found:
                 raise BrowserSearchError('Meta 浏览器未返回有效搜索结果；可能访问受限或页面结构变化，不视为空结果')
             def eligible():
-                return [ad for ad in ads.values() if in_launch_window(ad, launch_from, launch_to)]
+                return [ad for ad in ads.values() if in_launch_window(ad, launch_from, launch_to)
+                        and (kind != 'keyword' or search_mode != 'exact' or matches_exact_phrase(ad, query))]
             for _ in range(4):
                 # Old rows do not consume the requested recent-ad sample limit.
                 if len(eligible()) >= limit or has_more is False:

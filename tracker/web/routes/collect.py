@@ -59,11 +59,11 @@ def collect_start(request: Request, mode: str = Form('keyword'), keyword: str = 
                   page_name: str = Form(''), country: str = Form('US'),
                   ad_status: str = Form('ACTIVE'), max_ads: int = Form(30),
                   interval_hours: int = Form(24), launch_days: int = Form(7),
-                  collection_sort: str = Form('newest')):
+                  collection_sort: str = Form('newest'), match_mode: str = Form('exact')):
     if not _authed(request):
         return _error('unauthorized', 401)
     country, keyword, new_page = country.strip().upper(), keyword.strip(), new_page.strip()
-    if mode not in ('pages', 'keyword') or ad_status not in ('ACTIVE', 'INACTIVE', 'ALL'):
+    if mode not in ('pages', 'keyword') or ad_status not in ('ACTIVE', 'INACTIVE', 'ALL') or match_mode not in ('exact', 'broad'):
         return _error('采集方式或广告状态无效')
     if launch_days not in WINDOWS or collection_sort not in SORTS:
         return _error('请选择有效的上线时间范围和采集排序')
@@ -112,8 +112,8 @@ def collect_start(request: Request, mode: str = Form('keyword'), keyword: str = 
                 conn.execute('UPDATE pages SET collect_country=%s WHERE id=ANY(%s)', (country,page_ids))
         conn.execute('''UPDATE app_settings SET collect_source='self_hosted', collect_mode=%s,
           collect_keyword=%s, collect_country=%s, collect_region=%s, collect_ad_status=%s, self_hosted_max_ads=%s,
-          collect_interval_hours=%s, collect_launch_days=%s, collect_sort=%s,
+          collect_interval_hours=%s, collect_launch_days=%s, collect_sort=%s, collect_match_mode=%s,
           collect_now=TRUE,collect_now_requested_at=now(),updated_at=now()
-          WHERE id=1''', (mode,keyword,country,region,ad_status,max_ads,interval_hours,launch_days,collection_sort))
+          WHERE id=1''', (mode,keyword,country,region,ad_status,max_ads,interval_hours,launch_days,collection_sort,match_mode))
     return JSONResponse({**jsonable_encoder(db.get_run_status()), 'accepted': True},
                         headers={'Cache-Control': 'no-store'})

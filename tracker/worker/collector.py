@@ -208,11 +208,13 @@ async def _collect_browser(run: _Run, pages: list[dict], settings: dict,
     browser = make_browser() if make_browser else MetaBrowser(proxy=proxies[0] if proxies else None)
     keyword = settings.get('collect_keyword', '').strip()
     mode = settings.get('collect_mode', 'pages')
+    search_mode = settings.get('collect_match_mode') or 'exact'
     country = settings.get('collect_country') or 'US'
     status = settings.get('collect_ad_status') or 'ACTIVE'
     limit = max(1, min(200, int(settings.get('self_hosted_max_ads') or 30)))
     launch_from, launch_to = launch_window(int(settings.get('collect_launch_days', 7)))
     collection_sort = settings.get('collect_sort') or 'newest'
+    match_label = ('; 匹配=完整短语' if search_mode == 'exact' else '; 匹配=宽泛关键词') if mode == 'keyword' else ''
     window_label = f'; 新上线={launch_from}至{launch_to}' if launch_from else '; 新上线=不限'
     sort_label = '; 排序=' + ('最新上线优先' if collection_sort == 'newest' else 'Meta默认顺序')
     targets = browser_targets(pages, settings)
@@ -220,7 +222,7 @@ async def _collect_browser(run: _Run, pages: list[dict], settings: dict,
     scope = f'{REGIONS[region][0]}（{len(REGIONS[region][1])} 国）' if region else country
     run.conn.execute('UPDATE collection_runs SET pages_total=%s, collection_method=%s, scope=%s, search_keyword=%s WHERE id=%s',
                      (len(targets), 'public_browser',
-                      f'{mode}; {scope}; {status}; limit={limit}' + window_label + sort_label + (f'; query={keyword}' if mode == 'keyword' else ''),
+                      f'{mode}; {scope}; {status}; limit={limit}' + window_label + sort_label + match_label + (f'; query={keyword}' if mode == 'keyword' else ''),
                       keyword if mode == 'keyword' else None, run.run_id))
     run.conn.commit()
     try:
@@ -232,7 +234,7 @@ async def _collect_browser(run: _Run, pages: list[dict], settings: dict,
             tallies = {}
             try:
                 records, complete = await asyncio.wait_for(browser.search(
-                    query, region, limit, kind, status, 'broad',
+                    query, region, limit, kind, status, search_mode,
                     launch_from=launch_from, launch_to=launch_to, sort=collection_sort), timeout=150)
                 if not complete:
                     run.progress.partial_pages += 1
@@ -572,8 +574,10 @@ def _resume(conn, run_id: int, tracked: list[dict], default_country: str):
 # ── The run ─────────────────────────────────────────────────────────────────
 
 async def _collect_run(conn, *, make_collector=_default_make_collector, make_apify=_default_make_apify,
-                       trigger: str = "manual", resume: int | None = None) -> tuple[int, RunProgress]:
+                       trigger: str = "manual", resume: int | None = None, settings_override=None) -> tuple[int, RunProgress]:
     settings = db.get_app_settings() or {}
+    if settings_override:
+        settings = {**settings, **settings_override}
     source = "apify" if resume is not None else settings.get("collect_source") or "self_hosted"
     default_country = (settings.get("collect_country") or "US").upper()
     pages = db.list_tracked_pages()
@@ -618,7 +622,7 @@ async def _collect_run(conn, *, make_collector=_default_make_collector, make_api
 
 
 def run_collection(*, make_collector=_default_make_collector, make_apify=_default_make_apify,
-                   trigger: str = "manual", resume: int | None = None) -> tuple[int, RunProgress]:
+                   trigger: str = "manual", resume: int | None = None, settings_override=None) -> tuple[int, RunProgress]:
     """Collect every tracked Page (sync on the outside; async on the inside), or,
     with `resume`, carry on the run of that id through Apify that a stopped worker
     left open (see `_resume`).
@@ -630,7 +634,7 @@ def run_collection(*, make_collector=_default_make_collector, make_apify=_defaul
     try:
         return asyncio.run(
             _collect_run(conn, make_collector=make_collector, make_apify=make_apify,
-                         trigger=trigger, resume=resume)
+                         trigger=trigger, resume=resume, settings_override=settings_override)
         )
     finally:
         conn.close()
