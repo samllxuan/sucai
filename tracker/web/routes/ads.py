@@ -108,11 +108,13 @@ def ad_detail(request: Request, ad_archive_id: str):
     from ...db.metadata import coverage_details
     coverage_regions = coverage_details(ad_archive_id)
     # Public editorial summaries are limited to exact, sourced drama titles.
-    synopses = {
-        '1126108780401351': ('为逃避包办婚姻、保护双胞胎，六翼天使寻找隐居人间的魔王。', 'https://dramafinds.com/fr/detail/260011/mon-%C3%A9poux-a-fait-s-incliner-le-ciel'),
-        '1840181290443402': ('薇薇安发现秘密情人狮王即将迎娶继姐，在禁忌关系与家庭冲突中主动出击。', 'https://www.reelviral.net/drama/dramawave/Bubr09ZCg0/'),
-    }
-    synopsis = synopses.get(ad_archive_id)
+    synopses = (
+        ("mon époux a fait s'incliner le ciel", '为逃避包办婚姻、保护双胞胎，六翼天使寻找隐居人间的魔王。', 'https://dramafinds.com/fr/detail/260011/mon-%C3%A9poux-a-fait-s-incliner-le-ciel'),
+        ('stealing my sister’s lion king fiancé', '薇薇安发现秘密情人狮王即将迎娶继姐，在禁忌关系与家庭冲突中主动出击。', 'https://www.reelviral.net/drama/dramawave/Bubr09ZCg0/'),
+    )
+    normalized_title = title.casefold().replace("'", "’").replace('é', 'e')
+    synopsis = next(((summary, source) for name, summary, source in synopses
+                     if normalized_title.startswith(name.casefold().replace("'", "’").replace('é', 'e'))), None)
     # the ad's own primary text; a card's text only when the ad has none
     body = ad["body"] or next((c["body"] for c in creatives if c["body"]), "")
     cta = next((c["cta_text"] for c in creatives if c["cta_text"]), "")
