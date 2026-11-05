@@ -22,11 +22,14 @@ from dataclasses import dataclass
 
 from .ads import ad_kind
 from .base import _date_only, connect, resolve_media_url
-from .metadata import metadata_for_ads
+from .metadata import country_names, metadata_for_ads
 
 PAGE_SIZE = 48
 CHAMPION_SLOTS = 8
 SORTS = ("dur", "new", "launch", "rank")
+EU_COUNTRY_CODES = frozenset(
+    "AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE".split()
+)
 
 # One row per ad that has creatives. Creatives are read in display order
 # (creative_index, then id); "first non-empty" copies the library's card text.
@@ -209,6 +212,136 @@ def get_library_page(filters: LibraryFilters, sort: str = "dur", page: int = 0,
             **metadata.get(r['ad_archive_id'],{}),
         })
     return {"cards": cards, "total": total, "ad_count":counts['ads'], "page": page, "pages": pages, "page_size": page_size}
+
+
+def get_library_summary(filters: LibraryFilters) -> dict:
+    """Aggregate every filtered ad, without loading the library into Python."""
+    where, params = filters.where()
+    params["eu_countries"] = list(EU_COUNTRY_CODES)
+    with connect() as conn:
+        row = conn.execute(
+            _AD_SUMMARY
+            + f"""
+            , filtered AS MATERIALIZED (
+                SELECT * FROM ad_summary WHERE {where}
+            )
+            , measured AS (
+                SELECT f.*, reach.reach AS ad_reach,
+                       gender.gender_rows, gender.male, gender.female, gender.unknown
+                FROM filtered f
+                LEFT JOIN LATERAL (
+                    SELECT SUM((region->>'reach')::bigint) AS reach
+                    FROM ads a
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(a.coverage_data->'regions') = 'array'
+                             THEN a.coverage_data->'regions' ELSE '[]'::jsonb END
+                    ) AS region
+                    WHERE a.id = f.id AND jsonb_typeof(region->'reach') = 'number'
+                ) reach ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) FILTER (
+                               WHERE jsonb_typeof(gender_row->'male') = 'number'
+                                  OR jsonb_typeof(gender_row->'female') = 'number'
+                                  OR jsonb_typeof(gender_row->'unknown') = 'number'
+                           ) AS gender_rows,
+                           SUM(CASE WHEN jsonb_typeof(gender_row->'male') = 'number'
+                                    THEN (gender_row->>'male')::bigint END) AS male,
+                           SUM(CASE WHEN jsonb_typeof(gender_row->'female') = 'number'
+                                    THEN (gender_row->>'female')::bigint END) AS female,
+                           SUM(CASE WHEN jsonb_typeof(gender_row->'unknown') = 'number'
+                                    THEN (gender_row->>'unknown')::bigint END) AS unknown
+                    FROM ads a
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(a.coverage_data->'regions') = 'array'
+                             THEN a.coverage_data->'regions' ELSE '[]'::jsonb END
+                    ) AS region
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(region->'rows') = 'array'
+                             THEN region->'rows' ELSE '[]'::jsonb END
+                    ) AS gender_row
+                    WHERE a.id = f.id
+                ) gender ON TRUE
+            )
+            , totals AS (
+                SELECT COUNT(DISTINCT grp)::bigint AS total,
+                       SUM(ad_reach)::bigint AS total_reach,
+                       COUNT(*) FILTER (WHERE ad_reach IS NOT NULL)::bigint AS coverage_ad_count,
+                       MIN(delivery_start_time) AS earliest_launch,
+                       CASE WHEN COALESCE(SUM(gender_rows), 0) > 0
+                            THEN COALESCE(SUM(male), 0)::bigint END AS male,
+                       CASE WHEN COALESCE(SUM(gender_rows), 0) > 0
+                            THEN COALESCE(SUM(female), 0)::bigint END AS female,
+                       CASE WHEN COALESCE(SUM(gender_rows), 0) > 0
+                            THEN COALESCE(SUM(unknown), 0)::bigint END AS unknown
+                FROM measured
+            )
+            , representative AS (
+                SELECT ad_archive_id, ad_reach, COALESCE(title, '') AS title,
+                       COALESCE(body, '') AS body
+                FROM measured
+                WHERE btrim(COALESCE(title, '')) <> ''
+                   OR btrim(COALESCE(body, '')) <> ''
+                ORDER BY (btrim(COALESCE(title, '')) <> ''
+                          AND btrim(COALESCE(body, '')) <> '') DESC,
+                         ad_reach DESC NULLS LAST,
+                         delivery_start_time DESC NULLS LAST,
+                         ad_archive_id
+                LIMIT 1
+            )
+            SELECT totals.*,
+                   ARRAY(
+                       SELECT DISTINCT CASE WHEN code = ANY(%(eu_countries)s::text[])
+                                            THEN 'EU' ELSE code END
+                       FROM filtered f
+                       CROSS JOIN LATERAL unnest(
+                           COALESCE(f.coverage_countries, ARRAY[]::text[])
+                       ) AS country(code)
+                       WHERE code <> ''
+                       ORDER BY 1
+                   ) AS region_codes,
+                   ARRAY(
+                       SELECT DISTINCT platform
+                       FROM filtered f
+                       CROSS JOIN LATERAL unnest(
+                           COALESCE(f.publisher_platforms, ARRAY[]::text[])
+                       ) AS publisher(platform)
+                       WHERE btrim(platform) <> ''
+                       ORDER BY 1
+                   ) AS publishers,
+                   representative.ad_archive_id, representative.ad_reach,
+                   representative.title, representative.body
+            FROM totals
+            LEFT JOIN representative ON TRUE
+            """,
+            params,
+        ).fetchone()
+
+    regions = [
+        {"code": code, "name": "欧盟" if code == "EU" else country_names([code])[0]}
+        for code in row["region_codes"] or []
+    ]
+    representative = None
+    if row["ad_archive_id"]:
+        representative = {
+            "ad_archive_id": row["ad_archive_id"],
+            "reach": row["ad_reach"],
+            "title": row["title"] or "",
+            "body": row["body"] or "",
+        }
+    return {
+        "total": row["total"],
+        "total_reach": row["total_reach"],
+        "coverage_ad_count": row["coverage_ad_count"],
+        "earliest_launch": _date_only(row["earliest_launch"]),
+        "regions": regions,
+        "audience": {
+            "male": row["male"],
+            "female": row["female"],
+            "unknown": row["unknown"],
+        },
+        "publishers": row["publishers"] or [],
+        "representative_ad": representative,
+    }
 
 
 def get_champions(companies: tuple[str, ...] = ()) -> list[dict]:

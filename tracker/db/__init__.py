@@ -24,6 +24,7 @@ from .library import (
     get_champions,
     get_library_companies,
     get_library_page,
+    get_library_summary,
     iter_ads_for_export,
 )
 from .collections import (
@@ -70,7 +71,8 @@ from .admin import (
 __all__ = [
     "connect", "resolve_media_url",
     "get_ad_detail", "_is_real_carousel",
-    "LibraryFilters", "get_library_page", "get_champions", "get_library_companies",
+    "LibraryFilters", "get_library_page", "get_library_summary",
+    "get_champions", "get_library_companies",
     "iter_ads_for_export",
     "get_catalog_data", "get_product_detail",
     "list_landing_pages_for_export",

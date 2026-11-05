@@ -98,10 +98,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-        required: false   # not started when POSTGRES_HOST points elsewhere
       garage-init:
         condition: service_completed_successfully
-        required: false   # not started when media goes to an external S3
     restart: "no"
 
   web:

@@ -90,6 +90,13 @@ def library_api(request: Request):
                         headers={"cache-control": "no-store"})
 
 
+@router.get("/api/ads/summary")
+def library_summary_api(request: Request):
+    """Public aggregate statistics for the same filters as the library."""
+    return JSONResponse(jsonable_encoder(db.get_library_summary(library_filters(request))),
+                        headers={"cache-control": "no-store"})
+
+
 @router.get("/ads/{ad_archive_id}", response_class=HTMLResponse)
 def ad_detail(request: Request, ad_archive_id: str):
     if not _authed(request):

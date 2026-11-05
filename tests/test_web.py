@@ -76,6 +76,23 @@ def test_ad_detail_known_and_unknown(client, seeded):
     assert client.get("/ads/DOES_NOT_EXIST").status_code == 404
 
 
+def test_ad_detail_annotations_round_trip(client, seeded, db):
+    r = client.post(
+        "/ads/AD_EVERGREEN/annotation",
+        data={"favorite": "on", "tags": "hook, offer", "notes": "Keep this version."},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    row = db.execute(
+        "SELECT favorite, tags, notes FROM l2_ad_annotations WHERE ad_archive_id = %s",
+        ("AD_EVERGREEN",),
+    ).fetchone()
+    assert (row["favorite"], row["tags"], row["notes"]) == (
+        True, "hook, offer", "Keep this version."
+    )
+    assert client.get("/ads/AD_EVERGREEN").status_code == 200
+
+
 def test_ad_detail_links_to_its_landing_page(client, seeded):
     r = client.get("/ads/AD_EVERGREEN")
     assert f'href="/landing-pages/{seeded["lp"]}"' in r.text
@@ -295,6 +312,34 @@ def test_library_api(client, anon_client, seeded):
     assert [c["id"] for c in body["cards"]] == ["AD_CAROUSEL"]
     assert body["total"] == 1 and body["champions"]
     assert client.get("/api/ads", params={"page": "abc", "min_days": "x"}).status_code == 200
+
+
+def test_library_summary_api_is_public(anon_client, seeded, db):
+    from psycopg.types.json import Jsonb
+
+    db.execute(
+        """UPDATE ads SET coverage_data = %s, coverage_countries = %s
+           WHERE ad_archive_id = 'AD_EVERGREEN'""",
+        (
+            Jsonb({"regions": [
+                {"region": "EU", "reach": 30, "rows": [
+                    {"country": "DE", "age": "25-34", "male": 3, "female": 27, "unknown": 0},
+                ]},
+            ]}),
+            ["DE"],
+        ),
+    )
+    db.commit()
+
+    response = anon_client.get("/api/ads/summary", params={"status": "all", "sort": "launch"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["total"] == 4
+    assert body["total_reach"] == 30
+    assert body["regions"] == [{"code": "EU", "name": "欧盟"}]
+    assert body["audience"] == {"male": 3, "female": 27, "unknown": 0}
+    assert body["representative_ad"]["ad_archive_id"] == "AD_EVERGREEN"
 
 
 # ── first-run wizard ────────────────────────────────────────────────────────

@@ -52,6 +52,113 @@ def test_library_pagination(seeded):
     assert _page(status="all", page_size=3, page=99)["page"] == 1           # clamped to the last page
 
 
+def test_library_summary_aggregates_coverage_regions_and_platforms(seeded, db):
+    from psycopg.types.json import Jsonb
+
+    from tracker import db as dbmod
+
+    db.execute(
+        """UPDATE ads SET delivery_start_time = '2026-01-02T08:00:00Z',
+                          coverage_countries = %s, coverage_data = %s,
+                          publisher_platforms = %s
+           WHERE ad_archive_id = 'AD_EVERGREEN'""",
+        (
+            ["DE", "GB"],
+            Jsonb({"regions": [
+                {"region": "EU", "reach": 30, "rows": [
+                    {"country": "DE", "age": "25-34", "male": 3, "female": 27, "unknown": 0},
+                ]},
+                {"region": "GB", "reach": 10, "rows": [
+                    {"country": "GB", "age": "25-34", "male": 2, "female": 8, "unknown": 0},
+                ]},
+            ]}),
+            ["FACEBOOK", "INSTAGRAM", "THREADS"],
+        ),
+    )
+    db.execute(
+        """UPDATE ads SET delivery_start_time = '2025-12-31T08:00:00Z',
+                          coverage_countries = %s, coverage_data = %s,
+                          publisher_platforms = %s
+           WHERE ad_archive_id = 'AD_CAROUSEL'""",
+        (
+            ["US"],
+            Jsonb({"regions": [
+                {"region": "US", "reach": 5, "rows": [
+                    {"country": "US", "age": "25-34", "male": 2, "female": 3, "unknown": 0},
+                ]},
+            ]}),
+            ["INSTAGRAM", "THREADS"],
+        ),
+    )
+    db.commit()
+
+    summary = dbmod.get_library_summary(dbmod.LibraryFilters(status="all"))
+    assert summary["total"] == 4
+    assert (summary["total_reach"], summary["coverage_ad_count"]) == (45, 2)
+    assert summary["earliest_launch"] == "2025-12-31"
+    assert summary["regions"] == [
+        {"code": "EU", "name": "欧盟"},
+        {"code": "GB", "name": "英国"},
+        {"code": "US", "name": "美国"},
+    ]
+    assert summary["audience"] == {"male": 7, "female": 38, "unknown": 0}
+    assert summary["publishers"] == ["FACEBOOK", "INSTAGRAM", "THREADS"]
+    assert summary["representative_ad"] == {
+        "ad_archive_id": "AD_EVERGREEN",
+        "reach": 40,
+        "title": "Approved without cramming",
+        "body": "Method that already got 200k students approved.",
+    }
+
+
+def test_library_summary_skips_higher_coverage_ads_without_copy(seeded, db):
+    from psycopg.types.json import Jsonb
+
+    from tracker import db as dbmod
+
+    db.execute(
+        """UPDATE ads SET coverage_data = %s, coverage_countries = %s
+           WHERE ad_archive_id = 'AD_VARIANTS'""",
+        (Jsonb({"regions": [{"region": "EU", "reach": 100, "rows": []}]}), ["DE"]),
+    )
+    db.execute("UPDATE creatives SET title = NULL, body = NULL WHERE ad_id = "
+               "(SELECT id FROM ads WHERE ad_archive_id = 'AD_VARIANTS')")
+    db.execute(
+        """UPDATE ads SET coverage_data = %s, coverage_countries = %s
+           WHERE ad_archive_id = 'AD_CEMETERY'""",
+        (Jsonb({"regions": [{"region": "EU", "reach": 50, "rows": []}]}), ["FR"]),
+    )
+    db.commit()
+
+    summary = dbmod.get_library_summary(dbmod.LibraryFilters(status="all"))
+    assert summary["representative_ad"]["ad_archive_id"] == "AD_CEMETERY"
+    assert summary["representative_ad"]["reach"] == 50
+
+
+def test_library_summary_missing_and_empty_coverage(seeded):
+    from tracker import db as dbmod
+
+    partial = dbmod.get_library_summary(dbmod.LibraryFilters(status="all", q="ESSAY"))
+    assert partial["total"] == 1
+    assert partial["total_reach"] is None
+    assert partial["coverage_ad_count"] == 0
+    assert partial["regions"] == []
+    assert partial["audience"] == {"male": None, "female": None, "unknown": None}
+    assert partial["representative_ad"]["ad_archive_id"] == "AD_CEMETERY"
+
+    empty = dbmod.get_library_summary(dbmod.LibraryFilters(status="all", q="no such ad"))
+    assert empty == {
+        "total": 0,
+        "total_reach": None,
+        "coverage_ad_count": 0,
+        "earliest_launch": None,
+        "regions": [],
+        "audience": {"male": None, "female": None, "unknown": None},
+        "publishers": [],
+        "representative_ad": None,
+    }
+
+
 def test_library_folds_versions_into_one_card(seeded, db):
     db.execute("UPDATE ads SET collation_id = 'C1' WHERE ad_archive_id IN ('AD_VARIANTS', 'AD_CEMETERY')")
     db.commit()

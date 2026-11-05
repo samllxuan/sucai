@@ -5,7 +5,11 @@ WORKDIR /app
 
 # ffmpeg: video compression in the worker (the mirror rescales/re-encodes videos).
 # Without it the worker still works, but mirrors videos uncompressed (fallback).
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Retries "8";\nAcquire::http::Timeout "30";\n' \
+        > /etc/apt/apt.conf.d/99-network-retries \
+    && apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencies first (better layer caching).
