@@ -1,0 +1,16 @@
+<div class="collected-app-grid">
+  {% for app in collected_apps %}
+  <article class="collected-app-card">
+    <a class="collected-app-main" href="{{ app.url }}">
+      <h3>{{ app.name }}</h3>
+      <p class="collected-app-count"><strong>{{ app.ad_count }}</strong> 条广告 · {{ app.card_count }} 个素材卡片</p>
+      <p>{{ app.active_count }} 条投放中 · {{ app.page_count }} 个广告主页 · {{ app.runs }} 次采集</p>
+      <p>最近采集：{{ app.last_collected_label }}（北京时间）</p>
+      <span class="collected-app-open">查看已采集素材 →</span>
+    </a>
+    <a class="collected-app-continue" href="{{ app.collect_url }}">继续采集 {{ app.name }} →</a>
+  </article>
+  {% else %}
+  <p class="panel-note">还没有 App / 关键词采集记录。<a href="/collect">输入 App 名称开始采集 →</a></p>
+  {% endfor %}
+</div>

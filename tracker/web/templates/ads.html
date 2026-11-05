@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}{{ _("Ads") }}{% endblock %}
+{% block body %}
+{% set nav_active = 'ads' %}
+{% set show_search = true %}
+{% include "_masthead.html" %}
+
+<main class="wrap">
+  {% include "_drama_rank.html" %}
+
+  {% include "_recent_meta.html" %}
+  <section class="collect-banner">
+    <div><h2>采集新的广告素材</h2><p>输入 App 名称 / 关键词，或选择广告主页；任务进度与采集结果实时可查。</p></div>
+    <a href="/collect" class="btn btn-primary">开始采集 →</a>
+  </section>
+  <section class="collected-app-section" aria-labelledby="collected-app-title">
+    <div class="collected-app-heading"><h2 id="collected-app-title">已采集 App / 关键词 <small>{{ collected_apps_total }}</small></h2><a href="/collected-apps">查看全部采集目标 →</a></div>
+    <p class="panel-note">点击查看该目标历次采集命中的素材；结果按广告去重，搜索命中不等于已确认产品归属。</p>
+    {% include "_collected_app_cards.html" %}
+  </section>
+  {# ---- What's working (champions carousel) ---- #}
+  <details class="champ-section"{% if app_key %} hidden{% endif %}><summary>长投素材榜（点击展开）</summary>
+  <div class="sect">
+    <div class="lede">
+      <div class="kick">{{ _("Champions") }}</div>
+      <h2>{{ _("What's working") }}</h2>
+      <div class="note" id="champ-note">{{ _("Each competitor's longest-running ads") }}</div>
+    </div>
+  </div>
+  <div class="champ-wrap">
+    <button class="carrow prev" id="champ-prev" type="button" aria-label="{{ _('Previous') }}">
+      <svg class="icon"><use href="#i-left"/></svg>
+    </button>
+    <div class="champs" id="champs"></div>
+    <button class="carrow next" id="champ-next" type="button" aria-label="{{ _('Next') }}">
+      <svg class="icon"><use href="#i-right"/></svg>
+    </button>
+  </div>
+  </details>
+  {# ---- The library (filtered grid) ---- #}
+  <div class="sect" id="library">
+    <div class="lede">
+      <div class="kick">{{ _("The library") }}</div>
+      <h2>{% if app_key %}{{ selected_app.name if selected_app else app_key }} 的采集素材{% else %}{{ _("All ads") }}{% endif %} <span class="fig" id="count">0</span></h2>
+    </div>
+    <div class="viewtabs" id="view">
+      <button type="button" data-v="gallery">{{ _("Gallery") }}</button>
+      <button class="on" type="button" data-v="grid">{{ _("Grid") }}</button>
+      <button type="button" data-v="copy">{{ _("Ad copy") }}</button>
+    </div>
+  </div>
+
+  {% if app_key %}<div class="collected-app-selection"><span>当前范围：{{ selected_app.name if selected_app else app_key }} 的历次采集命中结果，下面的筛选仅在此范围内生效。</span><a href="/?status=all&amp;sort=launch#library">清除 App 范围，查看全部素材 →</a></div>{% endif %}
+  <div class="filters">
+    <div class="filt">
+      <span class="l">{{ _("Company") }}</span>
+      {% with choices=company_choices, ms_id="f-company" %}{% include "_company_filter.html" %}{% endwith %}
+    </div>
+    <div class="filt">
+      <span class="l">{{ _("Media") }}</span>
+      <span class="seg" id="f-media">
+        <button class="on" type="button" data-v="">{{ _("All") }}</button>
+        <button type="button" data-v="image">{{ _("Image") }}</button>
+        <button type="button" data-v="video">{{ _("Video") }}</button>
+        <button type="button" data-v="carousel">{{ _("Carousel") }}</button>
+      </span>
+    </div>
+    <div class="filt">
+      <span class="l">{{ _("Status") }}</span>
+      <span class="seg" id="f-status">
+        <button type="button" data-v="active">{{ _("Active") }}</button>
+        <button type="button" data-v="inactive">{{ _("Inactive") }}</button>
+        <button class="on" type="button" data-v="all">{{ _("All") }}</button>
+      </span>
+    </div>
+    <div class="filt">
+      <span class="l">{{ _("Duration") }}</span>
+      <span class="seg" id="f-dur">
+        <button class="on" type="button" data-v="">{{ _("Any") }}</button>
+        <button type="button" data-v="7">{{ _("%(days)sd+", days=7) }}</button>
+        <button type="button" data-v="14">{{ _("%(days)sd+", days=14) }}</button>
+        <button type="button" data-v="30">{{ _("%(days)sd+", days=30) }}</button>
+        <button type="button" data-v="90">{{ _("%(days)sd+", days=90) }}</button>
+      </span>
+      <input class="durinput" id="f-dur-custom" type="number" min="1" placeholder="{{ _('Xd+') }}" aria-label="{{ _('Custom minimum days running') }}">
+    </div>
+    <div class="filt" style="margin-left:auto">
+      <span class="l">{{ _("Sort") }}</span>
+      <span class="selectish">
+        <select id="sort">
+          <option value="dur">{{ _("Duration") }}</option>
+          <option value="rank">{{ _("Impression rank (per company, active)") }}</option>
+          <option value="new">{{ _("Newest") }}</option>
+          <option value="launch" selected>最新上线</option>
+        </select>
+        <svg class="icon"><use href="#i-down"/></svg>
+      </span>
+    </div>
+    <a class="exportbtn" id="export-csv" href="/ads.csv?status=all" title="{{ _('Download the ads matching these filters as a spreadsheet') }}">
+      <svg class="icon" style="width:14px;height:14px"><use href="#i-download"/></svg> {{ _("Export CSV") }}
+    </a>
+  </div>
+  <p class="filthint" id="rank-hint" hidden></p>
+  <div class="library-summary" id="library-summary" aria-live="polite"></div>
+  <p class="filthint">上线日期取自 Meta 开始投放时间；收录日期是本站首次保存时间。公开覆盖国家来自有正数覆盖人数的地区披露明细；搜索命中国家仅表示该国搜索结果中出现过，不代表完整投放范围。</p>
+
+  <div class="grid mode-grid" id="grid"></div>
+
+  <nav class="pager" id="pager" hidden aria-label="{{ _('Pagination') }}">
+    <button class="pgbtn" id="pg-prev" type="button"><svg class="icon" style="width:15px;height:15px"><use href="#i-left"/></svg> {{ _("Prev") }}</button>
+    <span class="pginfo" id="pg-info"></span>
+    <button class="pgbtn" id="pg-next" type="button">{{ _("Next") }} <svg class="icon" style="width:15px;height:15px"><use href="#i-right"/></svg></button>
+  </nav>
+</main>
+
+<script>window.__LIBRARY__ = {{ data_json|safe }};</script>
+<script src="{{ static_url('js/multiselect.js') }}" defer></script>
+<script src="{{ static_url('js/app.js') }}" defer></script>
+{% endblock %}
