@@ -14,6 +14,21 @@ def country_names(codes):
     return [_names().get(code, code) for code in codes or []]
 
 
+def coverage_details(ad_archive_id):
+    """Fetch demographic rows only for the requested ad, preserving undisclosed values."""
+    with connect() as conn:
+        row = conn.execute('SELECT coverage_data FROM ads WHERE ad_archive_id=%s', (ad_archive_id,)).fetchone()
+    regions = (row or {}).get('coverage_data') or {}
+    result = []
+    for region in regions.get('regions', []):
+        rows = []
+        for item in region.get('rows') or []:
+            code = item.get('country') or ''
+            rows.append({**item, 'country_name': _names().get(code, code)})
+        result.append({**region, 'rows': rows})
+    return result
+
+
 def metadata_for_ads(ad_ids):
     if not ad_ids:
         return {}

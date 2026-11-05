@@ -74,6 +74,10 @@
 
     {# ---- facts + copy ---- #}
     <div>
+      <section class="research-notes" style="padding:18px;margin-bottom:20px;border:1px solid var(--hair);border-radius:10px">
+        <h2 style="font-size:18px;margin:0 0 8px">一句话剧情简介</h2>
+        {% if synopsis %}<p>{{ synopsis[0] }}</p><p class="small">根据第三方公开剧情介绍整理 · <a href="{{ synopsis[1] }}" target="_blank" rel="noopener noreferrer">查看来源</a></p>{% else %}<p>暂无经过核实的剧情简介。</p>{% endif %}
+      </section>
       <section id="coverage-refresh" style="padding:18px;margin-bottom:20px;border:1px solid var(--hair);border-radius:10px">
         <h2 style="font-size:18px;margin:0 0 8px">Meta 公开覆盖详情</h2>
         <p style="line-height:1.6">重新读取此广告的欧盟／英国覆盖人数和地区明细。请求可能需要一分钟；失败不会清除已有数值。</p>
@@ -154,6 +158,17 @@
         {% if not ad.is_active and ad.last_seen %}<div class="f"><span class="k">{{ _("Last seen") }}</span><span class="v tnum">{{ ad.last_seen }}</span></div>{% endif %}
         <div class="f"><span class="k">{{ _("Ad ID") }}</span><span class="v tnum mono">{{ ad.ad_archive_id }}</span></div>
       </div>
+
+      <section style="margin:24px 0;padding:18px;border:1px solid var(--hair);border-radius:10px" id="coverage-breakdown">
+        <h2 style="font-size:18px;margin:0 0 8px">各国家与年龄、性别覆盖明细</h2>
+        <p style="line-height:1.6">Meta 披露的估计覆盖人数；“—”表示未披露，不表示 0。仅覆盖已公开的地区，不代表全球全部投放。</p>
+        {% for region in coverage_regions %}
+          <h3 style="font-size:16px;margin:16px 0 8px">{{ '欧盟' if region.region == 'EU' else ('英国' if region.region in ['GB','UK'] else region.region) }}{% if region.reach is not none %} · 总覆盖 {{ '{:,}'.format(region.reach) }}{% endif %}</h3>
+          {% if region.rows %}<div style="overflow-x:auto;max-height:460px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;text-align:left"><thead><tr><th>国家 / 地区</th><th>年龄</th><th>男性</th><th>女性</th><th>未知性别</th></tr></thead><tbody>
+          {% for row in region.rows %}<tr><td>{{ row.country_name }}</td><td>{{ row.age or '未注明' }}</td>{% for key in ['male','female','unknown'] %}<td>{{ '{:,}'.format(row[key]) if row[key] is not none else '—' }}</td>{% endfor %}</tr>{% endfor %}
+          </tbody></table></div>{% else %}<p>该地区没有返回年龄和性别明细。</p>{% endif %}
+        {% else %}<p>暂无公开明细，可尝试重新读取覆盖详情。</p>{% endfor %}
+      </section>
 
       {% if ad.versions %}
       <div class="versions">
