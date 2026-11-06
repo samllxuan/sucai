@@ -51,6 +51,7 @@ WITH ad_summary AS (
                     cr.body) AS body,
            cr.cta, cr.link_url, cr.landing_page_url,
            cr.thumb_url, cr.thumb_key, cr.image_url, cr.image_key,
+           drama.genres, drama.genres_source,
            CASE WHEN shows.cards THEN 'carousel'
                 WHEN cr.has_video THEN 'video' ELSE 'image' END AS media,
            CASE WHEN shows.cards THEN 1 ELSE cr.n_creatives END AS formats,
@@ -88,6 +89,15 @@ WITH ad_summary AS (
         LEFT JOIN landing_pages lp ON lp.id = x.landing_page_id
         WHERE x.ad_id = a.id
     ) cr ON cr.n_creatives > 0
+    LEFT JOIN LATERAL (
+        SELECT gs.genres, gs.genres_source
+        FROM creatives gx
+        JOIN page_snapshots gs ON gs.landing_page_id = gx.landing_page_id
+        WHERE gx.ad_id = a.id
+        ORDER BY gx.creative_index ASC NULLS LAST, gx.id ASC,
+                 gs.captured_at DESC, gs.id DESC
+        LIMIT 1
+    ) drama ON TRUE
     -- shown by its cards: from Meta's display format (see db.ads.CARD_FORMATS)
     CROSS JOIN LATERAL (
         SELECT CASE WHEN a.display_format IS NULL THEN cr.is_carousel
@@ -277,7 +287,7 @@ def get_library_summary(filters: LibraryFilters) -> dict:
             )
             , representative AS (
                 SELECT ad_archive_id, ad_reach, COALESCE(title, '') AS title,
-                       COALESCE(body, '') AS body
+                       COALESCE(body, '') AS body, genres, genres_source
                 FROM measured
                 WHERE btrim(COALESCE(title, '')) <> ''
                    OR btrim(COALESCE(body, '')) <> ''
@@ -308,8 +318,19 @@ def get_library_summary(filters: LibraryFilters) -> dict:
                        WHERE btrim(platform) <> ''
                        ORDER BY 1
                    ) AS publishers,
+                   ARRAY(
+                       SELECT DISTINCT genre
+                       FROM filtered f
+                       CROSS JOIN LATERAL unnest(
+                           COALESCE(f.genres, ARRAY[]::text[])
+                       ) AS drama_genre(genre)
+                       WHERE btrim(genre) <> ''
+                       ORDER BY 1
+                   ) AS genres,
                    representative.ad_archive_id, representative.ad_reach,
-                   representative.title, representative.body
+                   representative.title, representative.body,
+                   representative.genres AS representative_genres,
+                   representative.genres_source AS representative_genres_source
             FROM totals
             LEFT JOIN representative ON TRUE
             """,
@@ -327,6 +348,8 @@ def get_library_summary(filters: LibraryFilters) -> dict:
             "reach": row["ad_reach"],
             "title": row["title"] or "",
             "body": row["body"] or "",
+            "genres": row["representative_genres"] or [],
+            "genres_source": row["representative_genres_source"],
         }
     return {
         "total": row["total"],
@@ -340,6 +363,7 @@ def get_library_summary(filters: LibraryFilters) -> dict:
             "unknown": row["unknown"],
         },
         "publishers": row["publishers"] or [],
+        "genres": row["genres"] or [],
         "representative_ad": representative,
     }
 

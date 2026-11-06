@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import html as htmllib
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -35,6 +36,8 @@ REQUEST_DELAY = 1.5     # seconds between crawls (politeness / anti-block)
 FETCH_TIMEOUT = 20
 MAX_TITLE_CHARS = 300
 MAX_DESCRIPTION_CHARS = 500
+MAX_GENRES = 12
+MAX_GENRE_CHARS = 80
 _HEAD_CHARS = 300_000   # titles/meta live in <head>; don't regex a whole huge page
 MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
@@ -49,6 +52,18 @@ _WS_RE = re.compile(r"\s+")
 _META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""")
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_SERIES_INFO_RE = re.compile(
+    r"""<x-data\b[^>]*\bid\s*=\s*["']_data_series_info["'][^>]*>(.*?)</x-data>""",
+    re.IGNORECASE | re.DOTALL,
+)
+_LD_JSON_RE = re.compile(
+    r"""<script\b[^>]*\btype\s*=\s*["']application/ld\+json["'][^>]*>(.*?)</script>""",
+    re.IGNORECASE | re.DOTALL,
+)
+_NEXT_FLIGHT_RE = re.compile(
+    r"""self\.__next_f\.push\(\[1,\s*("(?:\\.|[^"\\])*")\]\)""",
+    re.DOTALL,
+)
 
 
 def _normalize_text(html: str) -> str:
@@ -90,6 +105,119 @@ def extract_title_and_description(html: str) -> tuple[str | None, str | None]:
     description = (meta.get("description") or meta.get("og:description")
                    or meta.get("twitter:description"))
     return _clean(title, MAX_TITLE_CHARS), _clean(description, MAX_DESCRIPTION_CHARS)
+
+
+# ── Drama genres ─────────────────────────────────────────────────────────────
+
+def _clean_genres(values) -> list[str]:
+    """Source-provided genre labels, in order, with duplicates removed."""
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    out, seen = [], set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        value = _clean(value, MAX_GENRE_CHARS)
+        key = value.casefold() if value else ""
+        if value and key not in seen:
+            seen.add(key)
+            out.append(value)
+        if len(out) >= MAX_GENRES:
+            break
+    return out
+
+
+def _mydramawave_genres(html: str) -> list[str]:
+    """MyDramaWave embeds the series JSON in an `<x-data>` element."""
+    match = _SERIES_INFO_RE.search(html)
+    if not match:
+        return []
+    try:
+        data = json.loads(htmllib.unescape(match.group(1)).strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return _clean_genres(data.get("content_tags")) if isinstance(data, dict) else []
+
+
+def _next_flight_text(html: str) -> str:
+    """Decode the JSON string literals Next.js streams through self.__next_f."""
+    parts = []
+    for match in _NEXT_FLIGHT_RE.finditer(html):
+        try:
+            value = json.loads(match.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(value, str):
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _json_value(text: str, key: str):
+    """Read one JSON value by key from a larger, not-quite-valid flight stream."""
+    match = re.search(
+        rf'"{re.escape(key)}"\s*:\s*("(?:\\.|[^"\\])*"|\[(?:\\.|[^\]])*\])',
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(1))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _b25_genres(html: str) -> list[str]:
+    """B25Reel pages carry book metadata in Next.js flight data."""
+    text = _next_flight_text(html)
+    if not text:
+        return []
+    return _clean_genres(_json_value(text, "tag"))
+
+
+def _json_ld_genres(html: str) -> list[str]:
+    """Schema.org entities commonly expose genres as `genre`."""
+    for match in _LD_JSON_RE.finditer(html):
+        payload = htmllib.unescape(match.group(1)).strip()
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        items = data if isinstance(data, list) else [data]
+        expanded = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            expanded.append(item)
+            if isinstance(item.get("@graph"), list):
+                expanded.extend(item["@graph"])
+        genres = []
+        for item in expanded:
+            genres.extend(_clean_genres(item.get("genre")))
+        cleaned = _clean_genres(genres)
+        if cleaned:
+            return cleaned
+    return []
+
+
+def extract_genres(html: str) -> tuple[list[str], str | None]:
+    """Drama genres explicitly published by known landing-page formats.
+
+    The labels are kept in their source language. A page without structured
+    genre metadata returns no genres; titles and ad copy are never used as
+    guesses.
+    """
+    for source, parser in (
+        ("mydramawave", _mydramawave_genres),
+        ("b25reel", _b25_genres),
+        ("json-ld", _json_ld_genres),
+    ):
+        genres = parser(html)
+        if genres:
+            return genres, source
+    return [], None
 
 
 # ── Crawl + snapshot ────────────────────────────────────────────────────────
@@ -149,7 +277,8 @@ def _fetch(url: str):
 
 def _latest_snapshot(conn, lp_id: int) -> dict | None:
     return conn.execute(
-        """SELECT id, content_hash, headline, description FROM page_snapshots
+        """SELECT id, content_hash, headline, description, genres, genres_source
+           FROM page_snapshots
            WHERE landing_page_id = %s ORDER BY captured_at DESC, id DESC LIMIT 1""",
         (lp_id,),
     ).fetchone()
@@ -181,6 +310,7 @@ def crawl_landing_page(conn, lp: dict) -> str:
 
     html = resp.text or ""
     title, description = extract_title_and_description(html)
+    genres, genres_source = extract_genres(html)
     normalized = _normalize_text(html)
     if not normalized and not title:
         _mark(conn, lp["id"], "no_content")
@@ -192,20 +322,28 @@ def crawl_landing_page(conn, lp: dict) -> str:
         raw = {
             "final_url": str(resp.url), "http_status": resp.status_code,
             "title": title, "description": description, "text_len": len(normalized),
+            "genres": genres, "genres_source": genres_source,
         }
         conn.execute(
-            """INSERT INTO page_snapshots (landing_page_id, content_hash, headline, description, raw)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (lp["id"], content_hash, title, description, Jsonb(raw)),
+            """INSERT INTO page_snapshots
+                   (landing_page_id, content_hash, headline, description, genres,
+                    genres_source, raw)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (lp["id"], content_hash, title, description, genres, genres_source, Jsonb(raw)),
         )
-        logger.info("  snapshot+ %s (%s)", url, title or "no title")
-    elif title and (title, description) != (latest["headline"], latest["description"]):
+        logger.info("  snapshot+ %s (%s, %d genres)", url, title or "no title", len(genres))
+    elif (title, description, genres, genres_source) != (
+        latest["headline"], latest["description"], latest["genres"],
+        latest["genres_source"],
+    ):
         # Same page text, but the title/description read now differ (the meta
         # tags changed): refresh the
         # latest snapshot in place rather than recording a new page version.
         conn.execute(
-            "UPDATE page_snapshots SET headline = %s, description = %s WHERE id = %s",
-            (title, description, latest["id"]),
+            """UPDATE page_snapshots
+               SET headline = %s, description = %s, genres = %s, genres_source = %s
+               WHERE id = %s""",
+            (title, description, genres, genres_source, latest["id"]),
         )
 
     _mark(conn, lp["id"], "ok")

@@ -38,6 +38,7 @@ def get_ad_detail(ad_archive_id: str) -> dict | None:
                    cr.image_url, cr.video_url, cr.thumbnail_url,
                    cr.media_image_key, cr.media_video_key, cr.media_thumb_key,
                    cr.landing_page_id, lp.url_canonical AS lp_url,
+                   drama.genres, drama.genres_source,
                    a.ad_archive_id, a.is_active, a.duration_days,
                    a.delivery_start_time, a.delivery_stop_time,
                    a.publisher_platforms, a.languages,
@@ -53,6 +54,13 @@ def get_ad_detail(ad_archive_id: str) -> dict | None:
             JOIN companies c ON a.company_id = c.id
             LEFT JOIN pages p ON p.id = a.page_ref_id
             LEFT JOIN landing_pages lp ON lp.id = cr.landing_page_id
+            LEFT JOIN LATERAL (
+                SELECT gs.genres, gs.genres_source
+                FROM page_snapshots gs
+                WHERE gs.landing_page_id = cr.landing_page_id
+                ORDER BY gs.captured_at DESC, gs.id DESC
+                LIMIT 1
+            ) drama ON TRUE
             LEFT JOIN LATERAL (
                 SELECT sort_index FROM ad_appearances
                 WHERE ad_id = a.id AND is_active = TRUE
@@ -92,10 +100,20 @@ def get_ad_detail(ad_archive_id: str) -> dict | None:
         v["thumb_url"] = thumb or image
         v["duration_days"] = v["duration_days"] or 0
 
+    genres, genre_sources = [], []
+    seen_genres = set()
     for r in rows:
         r["image_url"] = resolve_media_url(r.pop("image_url"), r.pop("media_image_key"))
         r["video_url"] = resolve_media_url(r.pop("video_url"), r.pop("media_video_key"))
         r["thumbnail_url"] = resolve_media_url(r.pop("thumbnail_url"), r.pop("media_thumb_key"))
+        for genre in r.pop("genres") or []:
+            key = genre.casefold()
+            if key not in seen_genres:
+                seen_genres.add(key)
+                genres.append(genre)
+        source = r.pop("genres_source")
+        if source and source not in genre_sources:
+            genre_sources.append(source)
         for key in ("title", "body", "description", "cta_text"):
             r[key] = clean_text(r[key])
 
@@ -120,6 +138,8 @@ def get_ad_detail(ad_archive_id: str) -> dict | None:
         "kind": ad_kind(first["display_format"], media),
         "is_carousel": is_carousel,
         "body": clean_text(first["ad_body"]),
+        "genres": genres,
+        "genres_source": ", ".join(genre_sources) or None,
         "page": {
             "name": first["page_name"] or first["ad_page_name"] or "",
             "avatar_url": resolve_media_url(first["profile_picture_url"], first["profile_picture_key"]),

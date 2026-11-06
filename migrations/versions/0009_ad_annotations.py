@@ -8,8 +8,9 @@ depends_on = None
 
 
 def upgrade():
+    # 0010_partner_api can create this legacy table first on a clean install.
     op.execute("""
-        CREATE TABLE l2_ad_annotations (
+        CREATE TABLE IF NOT EXISTS l2_ad_annotations (
             ad_archive_id TEXT PRIMARY KEY REFERENCES ads(ad_archive_id) ON DELETE CASCADE,
             favorite BOOLEAN NOT NULL DEFAULT FALSE,
             tags TEXT NOT NULL DEFAULT '',

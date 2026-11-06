@@ -339,7 +339,9 @@ def test_library_summary_api_is_public(anon_client, seeded, db):
     assert body["total_reach"] == 30
     assert body["regions"] == [{"code": "EU", "name": "欧盟"}]
     assert body["audience"] == {"male": 3, "female": 27, "unknown": 0}
+    assert body["genres"] == ["Drama", "Romance"]
     assert body["representative_ad"]["ad_archive_id"] == "AD_EVERGREEN"
+    assert body["representative_ad"]["genres"] == ["Drama", "Romance"]
 
 
 # ── first-run wizard ────────────────────────────────────────────────────────

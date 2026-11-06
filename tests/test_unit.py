@@ -142,6 +142,42 @@ def test_extract_title_and_description():
     assert extract('<meta property="og:title" content="   ">') == (None, None)
 
 
+# ── drama genre extraction ──────────────────────────────────────────────────
+
+def test_extract_genres_from_mydramawave_series_json():
+    from tracker.worker.resolver import extract_genres
+
+    html = """
+    <x-data style="display:none" id="_data_series_info">
+      {&#34;id&#34;:&#34;FR0zec1HkQ&#34;,
+       &#34;content_tags&#34;:[&#34;Harem&#34;,&#34;Super Warrior&#34;,&#34;harem&#34;]}
+    </x-data>
+    """
+    assert extract_genres(html) == (["Harem", "Super Warrior"], "mydramawave")
+
+
+def test_extract_genres_from_b25_nextjs_flight_data():
+    from tracker.worker.resolver import extract_genres
+
+    flight = '1:{"book_title":"The Imperfect Marriage",' \
+             '"special_desc":"Based on the novel",' \
+             '"tag":["Playing Dumb"]}'
+    html = f"<script>self.__next_f.push([1,{json.dumps(flight)}])</script>"
+    assert extract_genres(html) == (["Playing Dumb"], "b25reel")
+
+
+def test_extract_genres_from_json_ld_and_never_guesses_from_title():
+    from tracker.worker.resolver import extract_genres
+
+    html = """
+    <script type="application/ld+json">
+      {"@type":"TVSeries","name":"A Drama","genre":["Mystery","Drama"]}
+    </script>
+    """
+    assert extract_genres(html) == (["Mystery", "Drama"], "json-ld")
+    assert extract_genres("<title>Romance</title><h1>Harem drama</h1>") == ([], None)
+
+
 # ── landing-page crawl SSRF guard ───────────────────────────────────────────
 
 def _fake_dns(monkeypatch, table):

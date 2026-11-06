@@ -104,8 +104,11 @@ def seed_basic(conn) -> dict:
     ).fetchone()["id"]
     conn.execute("UPDATE creatives SET landing_page_id=%s WHERE ad_id=%s", (lp, a1))
     conn.execute(
-        "INSERT INTO page_snapshots (landing_page_id, content_hash, headline, description) VALUES (%s,%s,%s,%s)",
-        (lp, "hash-1", "Approval guaranteed", "Pass the exam in 90 days."),
+        """INSERT INTO page_snapshots
+               (landing_page_id, content_hash, headline, description, genres, genres_source)
+           VALUES (%s,%s,%s,%s,%s,%s)""",
+        (lp, "hash-1", "Approval guaranteed", "Pass the exam in 90 days.",
+         ["Drama", "Romance"], "json-ld"),
     )
 
     conn.commit()

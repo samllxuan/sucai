@@ -24,14 +24,15 @@ def get_catalog_data() -> dict:
                    c.name AS company_name, c.domain AS company_domain,
                    la.ad_count, la.window_start, la.window_end, la.currently_active,
                    la.max_duration_days, la.snapshot_count,
-                   ps.headline, ps.description,
+                   ps.headline, ps.description, ps.genres, ps.genres_source,
                    ps.captured_at AS snapshot_captured_at,
                    hero.raw_url AS hero_raw_url, hero.media_key AS hero_media_key
             FROM landing_pages lp
             JOIN companies c ON c.id = lp.company_id
             JOIN lp_activity la ON la.landing_page_id = lp.id
             LEFT JOIN LATERAL (
-                SELECT headline, description, captured_at FROM page_snapshots s
+                SELECT headline, description, genres, genres_source, captured_at
+                FROM page_snapshots s
                 WHERE s.landing_page_id = lp.id
                 ORDER BY s.captured_at DESC, s.id DESC LIMIT 1
             ) ps ON true
@@ -81,7 +82,7 @@ def get_product_detail(lp_id: int) -> dict | None:
             return None
 
         snapshots = conn.execute(
-            """SELECT id, content_hash, headline, description,
+            """SELECT id, content_hash, headline, description, genres, genres_source,
                       raw->>'final_url' AS final_url, captured_at
                FROM page_snapshots WHERE landing_page_id = %s
                ORDER BY captured_at DESC, id DESC""",

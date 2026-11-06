@@ -27,6 +27,7 @@
       <div class="panel-head"><div class="lede"><div class="kick">{{ _("Overview") }}</div><h2>{{ _("Basics") }}</h2></div></div>
       <div class="facts">
         <div class="f"><span class="k">{{ _("Ads pointing here") }}</span><span class="v tnum">{{ ads|length }}</span></div>
+        {% if latest %}<div class="f"><span class="k">剧集题材</span><span class="v">{{ latest.genres|join('、') if latest.genres else '未获取' }}{% if latest.genres_source %}（来源：{{ latest.genres_source }}）{% endif %}</span></div>{% endif %}
         {% if lp.first_seen %}<div class="f"><span class="k">{{ _("First seen") }}</span><span class="v tnum">{{ lp.first_seen }}</span></div>{% endif %}
         {% if lp.last_seen %}<div class="f"><span class="k">{{ _("Last seen") }}</span><span class="v tnum">{{ lp.last_seen }}</span></div>{% endif %}
         {% if latest %}

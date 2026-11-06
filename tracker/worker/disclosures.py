@@ -32,10 +32,10 @@ def country_codes(values):
 
 
 def parse_details(payload, page_id):
-    if payload.get('errors'):
-        raise ValueError('Meta 详情接口返回错误，已有覆盖数据保留')
     node = ((payload.get('data') or {}).get('ad_library_main') or {}).get('ad_details')
     if not isinstance(node, dict):
+        if payload.get('errors'):
+            raise ValueError('Meta 详情接口返回错误，已有覆盖数据保留')
         raise ValueError('Meta 未返回有效广告详情，已有覆盖数据保留')
     returned_page = ((node.get('advertiser') or {}).get('page') or {}).get('id')
     if returned_page is not None and str(returned_page) != str(page_id):
@@ -43,6 +43,9 @@ def parse_details(payload, page_id):
     transparency = node.get('transparency_by_location')
     if not isinstance(transparency, dict) or not any(k in transparency for k in ('eu_transparency','uk_transparency')):
         raise ValueError('Meta 详情缺少地区披露字段，已有数据保留')
+    # GraphQL may return usable partial data alongside an error for an unrelated
+    # field (for example advertiser.page_spend). Validate the coverage fields we
+    # actually consume instead of rejecting the whole response.
     regions = []
     for region, field, total in (('EU','eu_transparency','eu_total_reach'),('GB','uk_transparency','total_reach')):
         block = transparency.get(field)

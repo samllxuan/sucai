@@ -90,6 +90,22 @@ def test_library_summary_aggregates_coverage_regions_and_platforms(seeded, db):
             ["INSTAGRAM", "THREADS"],
         ),
     )
+    carousel_lp = db.execute(
+        """INSERT INTO landing_pages (company_id, url_canonical)
+           VALUES (%s, %s) RETURNING id""",
+        (seeded["companies"]["contoso"], "https://contoso-academy.example/drama"),
+    ).fetchone()["id"]
+    db.execute(
+        "UPDATE creatives SET landing_page_id = %s WHERE ad_id = "
+        "(SELECT id FROM ads WHERE ad_archive_id = 'AD_CAROUSEL')",
+        (carousel_lp,),
+    )
+    db.execute(
+        """INSERT INTO page_snapshots
+               (landing_page_id, content_hash, headline, genres, genres_source)
+           VALUES (%s, %s, %s, %s, %s)""",
+        (carousel_lp, "carousel-hash", "Campus drama", ["Comedy"], "mydramawave"),
+    )
     db.commit()
 
     summary = dbmod.get_library_summary(dbmod.LibraryFilters(status="all"))
@@ -103,11 +119,14 @@ def test_library_summary_aggregates_coverage_regions_and_platforms(seeded, db):
     ]
     assert summary["audience"] == {"male": 7, "female": 38, "unknown": 0}
     assert summary["publishers"] == ["FACEBOOK", "INSTAGRAM", "THREADS"]
+    assert summary["genres"] == ["Comedy", "Drama", "Romance"]
     assert summary["representative_ad"] == {
         "ad_archive_id": "AD_EVERGREEN",
         "reach": 40,
         "title": "Approved without cramming",
         "body": "Method that already got 200k students approved.",
+        "genres": ["Drama", "Romance"],
+        "genres_source": "json-ld",
     }
 
 
@@ -155,6 +174,7 @@ def test_library_summary_missing_and_empty_coverage(seeded):
         "regions": [],
         "audience": {"male": None, "female": None, "unknown": None},
         "publishers": [],
+        "genres": [],
         "representative_ad": None,
     }
 
@@ -235,6 +255,15 @@ def test_ad_detail_inactive_has_no_rank(seeded):
     assert ad["sort_index"] is None
 
 
+def test_ad_detail_exposes_source_genres(seeded):
+    from tracker import db
+
+    ad = db.get_ad_detail("AD_EVERGREEN")
+    assert ad["genres"] == ["Drama", "Romance"]
+    assert ad["genres_source"] == "json-ld"
+    assert db.get_ad_detail("AD_CAROUSEL")["genres"] == []
+
+
 def test_ad_detail_destinations(seeded):
     from tracker import db
 
@@ -286,17 +315,24 @@ def test_landing_title_crawl(seeded, db, monkeypatch):
             self.text, self.status_code, self.url = html, status, "https://northwindprep.example/exam-prep"
 
     lp = {"id": seeded["lp"], "url_canonical": "https://northwindprep.example/exam-prep"}
-    html = '<html><head><title>Exam Prep | Northwind</title></head><body>Hello</body></html>'
+    html = (
+        '<html><head><title>Exam Prep | Northwind</title>'
+        '<script type="application/ld+json">{"genre":["Education"]}</script>'
+        '</head><body>Hello</body></html>'
+    )
     monkeypatch.setattr(resolver, "_fetch", lambda url: Resp(html))
 
     def snapshots():
         return db.execute(
-            "SELECT headline FROM page_snapshots WHERE landing_page_id = %s ORDER BY id",
+            """SELECT headline, genres, genres_source FROM page_snapshots
+               WHERE landing_page_id = %s ORDER BY id""",
             (seeded["lp"],),
         ).fetchall()
 
     assert resolver.crawl_landing_page(db, lp) == "ok"
     assert [s["headline"] for s in snapshots()] == ["Approval guaranteed", "Exam Prep | Northwind"]
+    assert snapshots()[-1]["genres"] == ["Education"]
+    assert snapshots()[-1]["genres_source"] == "json-ld"
     resolver.crawl_landing_page(db, lp)              # same content -> no new version
     assert len(snapshots()) == 2
 
@@ -305,6 +341,7 @@ def test_landing_title_crawl(seeded, db, monkeypatch):
     monkeypatch.setattr(resolver, "_fetch", lambda url: Resp(retitled))
     resolver.crawl_landing_page(db, lp)
     assert [s["headline"] for s in snapshots()] == ["Approval guaranteed", "Exam Prep"]
+    assert snapshots()[-1]["genres"] == ["Education"]
 
     monkeypatch.setattr(resolver, "_fetch", lambda url: Resp("gone", status=404))
     assert resolver.crawl_landing_page(db, lp) == "fetch_failed"
