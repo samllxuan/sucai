@@ -62,14 +62,17 @@
   function adFacts(a) {
     var covered = a.coverage_country_names || [], observed = a.observed_country_names || [];
     var reaches = (a.reach_summary || []).filter(function (r) { return r.reach != null; }).map(function (r) {
-      return (r.region === 'EU' ? '欧盟' : '英国') + ' ' + Number(r.reach).toLocaleString('zh-CN');
+      var reach = typeof r.reach === 'number' ? r.reach.toLocaleString('zh-CN') : String(r.reach);
+      return (r.region_name || r.region) + ' ' + reach;
     });
+    var platformName = { meta: 'Meta', tiktok: 'TikTok' }[a.platform] || a.platform || 'Meta';
     return '<div class="adfacts">' +
+      '<div><span>平台</span><b>' + esc(platformName) + '</b></div>' +
       '<div><span>上线日期</span><b>' + esc(a.delivery_start || '未公开') + '</b></div>' +
       '<div><span>收录日期</span><b>' + esc(a.first_seen || '未获取') + '</b></div>' +
       '<div title="' + esc(covered.join('、') || '尚未获取公开地区披露') + '"><span>公开覆盖</span><b>' + esc(countryText(covered) || '未获取') + '</b></div>' +
       '<div title="搜索命中国家，不代表完整投放范围"><span>搜索命中</span><b>' + esc(countryText(observed) || '未记录') + '</b></div>' +
-      (reaches.length ? '<div title="Meta 公开估算值"><span>覆盖人数</span><b>' + esc(reaches.join(' · ')) + '</b></div>' : '') +
+      (reaches.length ? '<div title="' + esc(platformName + ' 公开估算值') + '"><span>覆盖人数</span><b>' + esc(reaches.join(' · ')) + '</b></div>' : '') +
       (a.coverage_status === 'failed' ? '<small>覆盖更新失败；已有数据保留</small>' : '') +
       '</div>';
   }

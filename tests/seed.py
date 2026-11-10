@@ -86,9 +86,13 @@ def seed_basic(conn) -> dict:
     appearance(a4, True, 2)
 
     # admin data
-    conn.execute("INSERT INTO pages (company_id, page_id, page_name, is_tracked) VALUES (%s,%s,%s,%s)",
+    conn.execute("""INSERT INTO pages
+                        (company_id, page_id, page_name, is_tracked, platform)
+                    VALUES (%s,%s,%s,%s,'meta')""",
                  (northwind, "111", "Northwind Prep", True))
-    conn.execute("INSERT INTO pages (company_id, page_id, page_name, is_tracked) VALUES (%s,%s,%s,%s)",
+    conn.execute("""INSERT INTO pages
+                        (company_id, page_id, page_name, is_tracked, platform)
+                    VALUES (%s,%s,%s,%s,'meta')""",
                  (contoso, "222", "Contoso Academy Official", False))
     conn.execute("INSERT INTO proxies (url, enabled) VALUES (%s,%s)", ("proxy.example:8080", True))
     conn.execute(

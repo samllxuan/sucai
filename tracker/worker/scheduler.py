@@ -173,8 +173,18 @@ def _post_collection_steps(step, fail):
             fail('读取公开覆盖信息', '部分公开详情读取失败，素材已保留，可在详情查看状态')
     except Exception:
         fail('读取公开覆盖信息', '公开详情读取失败，素材及已有覆盖数据保留')
-    # Link creatives -> landing pages (no network). Runs even if the
-    # collection failed, to drain creatives left pending from earlier runs.
+    _post_collection_content_steps(step, fail)
+    return media
+
+
+def _post_collection_steps_tiktok(step, fail):
+    """TikTok details already carry coverage and media; only enrich destinations."""
+    _post_collection_content_steps(step, fail)
+    return None
+
+
+def _post_collection_content_steps(step, fail):
+    """Link creatives to landing pages, then fetch each page's title and metadata."""
     step(STEP_LINKING)
     try:
         from .linking import run_linking
@@ -196,7 +206,6 @@ def _post_collection_steps(step, fail):
     except Exception as exc:
         logger.error("landing-page titles failed: %s", exc)
         fail(STEP_TITLES, exc)
-    return media
 
 
 def _run_once(trigger: str, resume: int | None = None, settings_override=None):
@@ -204,17 +213,21 @@ def _run_once(trigger: str, resume: int | None = None, settings_override=None):
     Apify that a stopped worker left), link, fetch titles, then close the run. The
     run stays open (and its progress visible in Settings) until every step is done,
     and what goes wrong on the way is counted as an error of the run."""
+    settings = db.get_app_settings() or {}
+    if settings_override:
+        settings = {**settings, **settings_override}
+    platform = settings.get("collect_platform") or "meta"
     if resume is None:
-        settings = db.get_app_settings() or {}
-        if settings_override:
-            settings = {**settings, **settings_override}
         configured = bool(settings.get('collect_keyword')) if settings.get('collect_mode') == 'keyword' else bool(db.list_tracked_pages())
         if not configured:
             logger.info('no collection targets configured: waiting for the collection page')
             return
     run_id, progress = None, RunProgress()
     try:
-        run_id, progress = run_collection(trigger=trigger, resume=resume, settings_override=settings_override)
+        kwargs = {"trigger": trigger, "resume": resume}
+        if settings_override is not None:
+            kwargs["settings_override"] = settings_override
+        run_id, progress = run_collection(**kwargs)
     except Exception as exc:  # never kills the loop
         logger.error("collection failed: %s", exc)
         if resume is not None:  # closed with the counters it had
@@ -238,7 +251,9 @@ def _run_once(trigger: str, resume: int | None = None, settings_override=None):
                 progress.last_error = f"{label}: {detail}"
                 report()
 
-            media = _post_collection_steps(step, fail)
+            steps = (_post_collection_steps_tiktok
+                     if platform == "tiktok" else _post_collection_steps)
+            media = steps(step, fail)
             if media is not None:
                 progress.media_total, progress.media_saved = media.total, media.saved
             if run_id is not None:
@@ -259,6 +274,7 @@ def _run_partner_job():
         return False
     settings = {'collect_mode':'keyword', 'collect_keyword':job['title'],
                 'collect_country':job['country'], 'collect_region':None,
+                'collect_platform':'meta',
                 'collect_source':'self_hosted', 'collect_match_mode':'exact',
                 'collect_ad_status':'ACTIVE', 'self_hosted_max_ads':30,
                 'collect_launch_days':0, 'collect_sort':'newest'}
@@ -330,6 +346,8 @@ def _resumable_run() -> int | None:
     it on: ads are still read through Apify, and it started recently enough."""
     try:
         settings = db.get_app_settings() or {}
+        if (settings.get("collect_platform") or "meta") != "meta":
+            return None
         if settings.get("collect_source") != "apify" or not settings.get("apify_token"):
             return None
         with db.connect() as conn:

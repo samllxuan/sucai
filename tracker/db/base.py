@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from ..config import get_settings
-from ..media_urls import is_meta_media_url
+from ..media_urls import is_allowed_media_url
 
 
 def _dsn() -> str:
@@ -54,7 +54,7 @@ def resolve_media_url(raw_url: str | None, media_key: str | None) -> str | None:
 
     The raw URL comes from collected data, so it is used only when it is on Meta's
     CDN over https: a page must not send the viewer's browser to any other host."""
-    raw = raw_url if is_meta_media_url(raw_url) else None
+    raw = raw_url if is_allowed_media_url(raw_url) else None
     if media_key:
         path = f"/media/{media_key}"
         return f"{path}?fallback={quote(raw, safe='')}" if raw else path

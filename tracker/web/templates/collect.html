@@ -4,14 +4,20 @@
 {% set nav_active = 'collect' %}
 {% include "_masthead.html" %}
 <main class="wrap">
-  <div class="page-head"><div class="kick">META 广告库</div><h1>开始采集</h1>
-    <p class="panel-note">先设置目标，再开始采集。结果自动进入素材库，图片和视频会尝试保存到本站。</p>
+  <div class="page-head"><div class="kick">META / TIKTOK 广告库</div><h1>开始采集</h1>
+    <p class="panel-note">先选择平台并设置目标。结果自动进入素材库，并按广告 ID 去重。</p>
   </div>
   <div class="stack">
     <section class="panel">
       <form method="POST" action="/collect/start" id="collect-form" data-label="保存设置并开始采集">
-        <h2>1. 选择采集目标</h2>
-        <div class="collect-modes">
+        <h2>1. 选择平台与采集目标</h2>
+        <div class="fld"><label class="flabel">广告平台</label>
+          <div class="collect-modes">
+            <label><input type="radio" name="collect_platform" value="meta"{% if settings.get('collect_platform','meta') == 'meta' %} checked{% endif %}> Meta 广告库</label>
+            <label><input type="radio" name="collect_platform" value="tiktok"{% if settings.get('collect_platform') == 'tiktok' %} checked{% endif %}> TikTok 广告库</label>
+          </div>
+        </div>
+        <div class="collect-modes" id="target-modes" style="margin-top:14px">
           <label><input type="radio" name="mode" value="keyword"{% if settings.collect_mode == 'keyword' or not companies %} checked{% endif %}> App 名称 / 关键词</label>
           <label><input type="radio" name="mode" value="pages"{% if settings.collect_mode != 'keyword' and companies %} checked{% endif %}> 指定广告主页</label>
         </div>
@@ -21,6 +27,7 @@
           <label class="flabel" for="match-mode" style="margin-top:12px">关键词匹配方式</label>
           <select class="inp" id="match-mode" name="match_mode"><option value="exact"{% if settings.get('collect_match_mode','exact') == 'exact' %} selected{% endif %}>完整短语匹配（适合剧名）</option><option value="broad"{% if settings.get('collect_match_mode') == 'broad' %} selected{% endif %}>宽泛关键词（用于发现线索）</option></select>
           <p class="panel-note">完整短语模式只保存公开标题、文案或主页名称中能核对到完整关键词的结果；剧名只出现在视频画面时可能漏掉。宽泛模式可能返回无关素材，不代表已核实剧目归属。</p>
+          <p class="panel-note" id="tiktok-target-note" hidden>TikTok 公开广告库第一版只支持关键词、完整短语和单个国家；素材详情会同时读取广告主、覆盖地区及受众数据。</p>
         </fieldset>
         <fieldset id="page-target" class="collect-target">
           <div class="collect-pages">
@@ -38,19 +45,19 @@
         <h2 style="margin-top:28px">2. 设置采集范围</h2>
         <div class="collect-options">
           <div class="fld"><label class="flabel" for="launch-days">广告上线时间</label><select class="inp" id="launch-days" name="launch_days">
-            {% for days,label in [(7,'近 7 天新上线'),(14,'近 14 天新上线'),(30,'近 30 天新上线'),(0,'不限上线日期')] %}<option value="{{ days }}"{% if settings.get('collect_launch_days',7) == days %} selected{% endif %}>{{ label }}</option>{% endfor %}
+            {% for days,label in [(7,'近 7 天新上线'),(14,'近 14 天新上线'),(30,'近 30 天新上线'),(0,'不限上线日期')] %}<option value="{{ days }}" data-meta-label="{{ label }}" data-tiktok-label="{{ 'TikTok 默认最近 30 天' if days == 0 else label }}"{% if settings.get('collect_launch_days',7) == days %} selected{% endif %}>{{ label }}</option>{% endfor %}
           </select></div>
-          <div class="fld"><label class="flabel" for="collection-sort">采集排序</label><select class="inp" id="collection-sort" name="collection_sort">
+          <div class="fld" id="sort-field"><label class="flabel" for="collection-sort">采集排序</label><select class="inp" id="collection-sort" name="collection_sort">
             <option value="newest"{% if settings.get('collect_sort','newest') == 'newest' %} selected{% endif %}>最新上线优先</option>
             <option value="default"{% if settings.get('collect_sort') == 'default' %} selected{% endif %}>Meta 默认顺序</option>
           </select></div>
           <div class="fld"><label class="flabel" for="collect-country">投放国家 / 区域</label>
             <select class="inp" id="collect-country" name="country" aria-describedby="scope-summary">
-              <optgroup label="按区域批量采集">{% for code,region in regions.items() %}<option value="{{ code }}" data-count="{{ region[1]|length }}"{% if code == settings.collect_region %} selected{% endif %}>{{ region[0] }}（{{ region[1]|length }} 国，含英国）</option>{% endfor %}</optgroup>
-              <optgroup label="单个国家">{% for code,name in countries %}<option value="{{ code }}" data-count="1"{% if not settings.collect_region and code == settings.collect_country %} selected{% endif %}>{{ name }} · {{ code }}</option>{% endfor %}</optgroup>
+              <optgroup label="按区域批量采集" id="region-countries">{% for code,region in regions.items() %}<option value="{{ code }}" data-count="{{ region[1]|length }}"{% if code == settings.collect_region %} selected{% endif %}>{{ region[0] }}（{{ region[1]|length }} 国，含英国）</option>{% endfor %}</optgroup>
+              <optgroup label="单个国家">{% for code,name in countries %}<option value="{{ code }}" data-count="1" data-tiktok="{{ 1 if code in tiktok_countries else 0 }}"{% if not settings.collect_region and code == settings.collect_country %} selected{% endif %}>{{ name }} · {{ code }}</option>{% endfor %}</optgroup>
             </select>
           </div>
-          <div class="fld"><label class="flabel" for="collect-status">广告状态</label><select class="inp" id="collect-status" name="ad_status">
+          <div class="fld" id="status-field"><label class="flabel" for="collect-status">广告状态</label><select class="inp" id="collect-status" name="ad_status">
             <option value="ACTIVE"{% if settings.collect_ad_status == 'ACTIVE' %} selected{% endif %}>投放中</option>
             <option value="ALL"{% if settings.collect_ad_status == 'ALL' %} selected{% endif %}>全部状态</option>
             <option value="INACTIVE"{% if settings.collect_ad_status == 'INACTIVE' %} selected{% endif %}>已停止投放</option>
@@ -59,9 +66,10 @@
           <div class="fld"><label class="flabel" for="interval-hours">自动采集间隔（小时）</label><input class="inp" id="interval-hours" name="interval_hours" type="number" min="1" max="168" value="{{ settings.collect_interval_hours or 24 }}" required></div>
         </div>
         <p class="panel-note" id="scope-summary" style="margin-top:12px" aria-live="polite"></p>
-        <p class="panel-note">“近 7 天新上线”按北京时间今天及前 6 个自然日计算，并核对 Meta 起投日期；不按本站收录时间判断。仅保存日期符合的素材，缺少起投日期的不混入近期结果。选择“投放中”可排除已停投素材。首页排序不会改变这里的采集条件。</p>
+        <p class="panel-note" id="meta-window-note">“近 7 天新上线”按北京时间今天及前 6 个自然日计算，并核对 Meta 起投日期；不按本站收录时间判断。仅保存日期符合的素材，缺少起投日期的不混入近期结果。选择“投放中”可排除已停投素材。首页排序不会改变这里的采集条件。</p>
         <details id="europe-country-list" hidden><summary>查看欧洲 45 国范围</summary><p class="panel-note">{% set country_names = dict(countries) %}{% for code in regions['EUROPE'][1] %}{{ country_names.get(code, code) }}{% if not loop.last %}、{% endif %}{% endfor %}</p></details>
-        <p class="panel-note" style="margin-top:12px">区域采集会按国家逐一搜索，同一广告跨国命中自动合并；主页模式的上限按每国每个主页计算。搜索国家不等于广告实际覆盖国家。公开数据可能受 Meta 访问限制及分页影响，不保证获取全部广告。曝光量、点击率等未公开指标不会推算或补成零。</p>
+        <p class="panel-note" id="meta-scope-note" style="margin-top:12px">区域采集会按国家逐一搜索，同一广告跨国命中自动合并；主页模式的上限按每国每个主页计算。搜索国家不等于广告实际覆盖国家。公开数据可能受 Meta 访问限制及分页影响，不保证获取全部广告。曝光量、点击率等未公开指标不会推算或补成零。</p>
+        <p class="panel-note" id="tiktok-scope-note" hidden>TikTok 搜索国家只代表本次搜索入口；覆盖地区取自广告详情公开披露。TikTok 的覆盖人数可能以区间表示（例如 0–1K），系统会原样保留，不把区间伪造成精确数字。</p>
         <div class="collect-actions"><button class="btn btn-primary" type="submit" id="collect-btn"><span id="collect-lbl">保存设置并开始采集</span></button><a class="btn btn-ghost" href="/">查看素材库 →</a><a href="/admin">高级设置</a></div>
       </form>
     </section>
@@ -74,7 +82,7 @@
       <div class="tablescroll" style="margin-top:16px"><table class="adtable"><thead><tr><th>开始时间</th><th>触发方式</th><th>状态</th><th>搜索进度</th><th>本次读取</th><th>新增素材</th><th>耗时</th><th>服务费用</th></tr></thead><tbody id="runs-body"></tbody></table></div>
       <p class="panel-note">历史样本导入用于界面对照；“手动”任务才是点击后新发起的采集。重复广告更新原记录，不重复增加素材数量。</p>
     </section>
-    <section class="panel"><h2>采集通道</h2><p>当前入口使用 Meta 公开浏览器读取，不调用付费模型或第三方采集服务。</p>
+    <section class="panel"><h2>采集通道</h2><p>当前入口使用 Meta 或 TikTok 的公开浏览器页面读取，不调用官方 API、付费模型或第三方采集服务。</p>
       <p class="panel-note">Apify：{{ '已配置，可在高级设置中选择' if settings.apify_token_mask else '未配置（可选）' }}。代理、媒体画质、主页与公司管理、语言等配置保留在“高级设置”中。素材库支持筛选、落地页关联及 CSV 导出。</p>
       <p class="panel-note">浏览器任务中断时，已入库数据保留；重启后会按保存的目标重新采集并去重。浏览器搜索页本身不支持从断点继续。</p>
     </section>

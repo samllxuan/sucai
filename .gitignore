@@ -20,6 +20,7 @@ venv/
 *.sqlite
 data/
 postgres-data/
+.playwright-cli/
 
 # ── Local planning notes (not part of the public repo) ────────────────
 .scratch/

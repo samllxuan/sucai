@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from ... import db, i18n
 from ...collection_scopes import REGIONS, resolve_scope
 from ...collection_window import WINDOWS, SORTS
+from ...worker.tiktok_browser import TIKTOK_COUNTRIES
 from ..deps import _authed, request_lang, templates
 from .admin import public_settings
 
@@ -37,13 +38,15 @@ def collect_home(request: Request):
     if not _authed(request):
         return RedirectResponse('/login', status_code=302)
     settings = public_settings(db.get_app_settings())
+    countries = i18n.countries(request_lang(request))
     keyword = request.query_params.get('keyword','').strip()[:200]
     if keyword:
         settings.update(collect_mode='keyword',collect_keyword=keyword)
     return templates.TemplateResponse(request, 'collect.html', {
         'settings': settings,
-        'companies': db.list_companies_with_pages(),
-        'countries': i18n.countries(request_lang(request)),
+        'companies': db.list_companies_with_pages(platform='meta'),
+        'countries': countries,
+        'tiktok_countries': set(TIKTOK_COUNTRIES),
         'regions': REGIONS,
         'run_status_json': json.dumps(jsonable_encoder(db.get_run_status())).replace('</', '<\\/'),
     })
@@ -59,18 +62,32 @@ def collect_start(request: Request, mode: str = Form('keyword'), keyword: str = 
                   page_name: str = Form(''), country: str = Form('US'),
                   ad_status: str = Form('ACTIVE'), max_ads: int = Form(30),
                   interval_hours: int = Form(24), launch_days: int = Form(7),
-                  collection_sort: str = Form('newest'), match_mode: str = Form('exact')):
+                  collection_sort: str = Form('newest'), match_mode: str = Form('exact'),
+                  collect_platform: str = Form('meta')):
     if not _authed(request):
         return _error('unauthorized', 401)
     country, keyword, new_page = country.strip().upper(), keyword.strip(), new_page.strip()
+    if collect_platform not in ('meta', 'tiktok'):
+        return _error('请选择有效的广告平台')
     if mode not in ('pages', 'keyword') or ad_status not in ('ACTIVE', 'INACTIVE', 'ALL') or match_mode not in ('exact', 'broad'):
         return _error('采集方式或广告状态无效')
     if launch_days not in WINDOWS or collection_sort not in SORTS:
         return _error('请选择有效的上线时间范围和采集排序')
-    try:
-        region, country = resolve_scope(country, dict(i18n.countries(i18n.DEFAULT_LANGUAGE)))
-    except ValueError as exc:
-        return _error(str(exc))
+    if collect_platform == 'tiktok':
+        if mode != 'keyword':
+            return _error('TikTok 采集仅支持关键词搜索')
+        if match_mode != 'exact':
+            return _error('TikTok 采集仅支持完整短语匹配')
+        if ad_status != 'ACTIVE':
+            return _error('TikTok 采集仅支持投放中的广告')
+        if country not in TIKTOK_COUNTRIES:
+            return _error('请选择 TikTok 公开广告库支持的国家')
+        region = None
+    else:
+        try:
+            region, country = resolve_scope(country, dict(i18n.countries(i18n.DEFAULT_LANGUAGE)))
+        except ValueError as exc:
+            return _error(str(exc))
     if not 1 <= max_ads <= 200 or not 1 <= interval_hours <= 168:
         return _error('每次搜索上限为 1–200 条，自动采集间隔为 1–168 小时')
     if mode == 'keyword' and not 1 <= len(keyword) <= 200:
@@ -95,7 +112,10 @@ def collect_start(request: Request, mode: str = Form('keyword'), keyword: str = 
         if settings['collect_now'] or running or recent_request:
             return _error('已有采集任务在排队或运行，请等待完成后再开始', 409)
         if mode == 'pages':
-            existing = conn.execute('SELECT id FROM pages WHERE id=ANY(%s)', (page_ids,)).fetchall()
+            existing = conn.execute(
+                "SELECT id FROM pages WHERE platform='meta' AND id=ANY(%s)",
+                (page_ids,),
+            ).fetchall()
             if len(existing) != len(set(page_ids)):
                 return _error('部分主页不存在，请刷新后重新选择')
             if new_id:
@@ -103,17 +123,18 @@ def collect_start(request: Request, mode: str = Form('keyword'), keyword: str = 
                 if not row:
                     company = conn.execute('INSERT INTO companies (name) VALUES (%s) RETURNING id',
                                            (page_name.strip() or f'Meta {new_id}',)).fetchone()
-                    row = conn.execute('''INSERT INTO pages (company_id,page_id,page_name,collect_country)
-                         VALUES (%s,%s,%s,%s) RETURNING id''',
+                    row = conn.execute('''INSERT INTO pages
+                         (company_id,page_id,page_name,collect_country,platform)
+                         VALUES (%s,%s,%s,%s,'meta') RETURNING id''',
                          (company['id'],new_id,page_name.strip() or None,country)).fetchone()
                 page_ids = [*page_ids, row['id']]
             conn.execute('UPDATE pages SET is_tracked=(id=ANY(%s))', (page_ids,))
             if not region:
                 conn.execute('UPDATE pages SET collect_country=%s WHERE id=ANY(%s)', (country,page_ids))
-        conn.execute('''UPDATE app_settings SET collect_source='self_hosted', collect_mode=%s,
+        conn.execute('''UPDATE app_settings SET collect_source='self_hosted', collect_platform=%s, collect_mode=%s,
           collect_keyword=%s, collect_country=%s, collect_region=%s, collect_ad_status=%s, self_hosted_max_ads=%s,
           collect_interval_hours=%s, collect_launch_days=%s, collect_sort=%s, collect_match_mode=%s,
           collect_now=TRUE,collect_now_requested_at=now(),updated_at=now()
-          WHERE id=1''', (mode,keyword,country,region,ad_status,max_ads,interval_hours,launch_days,collection_sort,match_mode))
+          WHERE id=1''', (collect_platform,mode,keyword,country,region,ad_status,max_ads,interval_hours,launch_days,collection_sort,match_mode))
     return JSONResponse({**jsonable_encoder(db.get_run_status()), 'accepted': True},
                         headers={'Cache-Control': 'no-store'})

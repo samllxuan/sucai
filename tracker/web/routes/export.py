@@ -24,7 +24,8 @@ from .landing import selected_company_ids
 router = APIRouter()
 
 AD_COLUMNS = [
-    "ad_archive_id", "company", "page_id", "page_name", "status", "duration_days",
+    "platform", "ad_archive_id", "external_ad_id", "company", "page_id", "page_name",
+    "status", "duration_days",
     "started", "stopped", "first_seen", "last_seen", "media", "creatives", "platforms",
     "languages", "impression_rank", "versions_group", "title", "body", "cta",
     "destination_url", "landing_page_url", "ad_library_url",

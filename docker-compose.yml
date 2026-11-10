@@ -132,7 +132,9 @@ services:
   worker:
     build: .
     command: ["python", "-m", "tracker.worker.scheduler"]
-    environment: *app-env
+    environment:
+      <<: *app-env
+      TIKTOK_PROXY: ${TIKTOK_PROXY:-}
     secrets: [postgres_password, s3_secret_access_key]
     depends_on:
       migrate:

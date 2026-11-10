@@ -42,6 +42,10 @@ def metadata_for_ads(ad_ids):
              FROM ads WHERE ad_archive_id=ANY(%s)''', (list(ad_ids),)).fetchall()
     result = {}
     for r in rows:
+        reach_summary = []
+        for region in r['reach_summary'] or []:
+            code = region.get('region') or ''
+            reach_summary.append({**region, 'region_name': _names().get(code, code)})
         item = {
             'delivery_start': _date_only(r['delivery_start_time']),
             'delivery_stop': _date_only(r['delivery_stop_time']),
@@ -58,7 +62,7 @@ def metadata_for_ads(ad_ids):
             'coverage_attempted_at': r['coverage_attempted_at'].isoformat() if r['coverage_attempted_at'] else None,
             'coverage_source': r['coverage_source'],
             'coverage_error': r['coverage_error'],
-            'reach_summary': r['reach_summary'] or [],
+            'reach_summary': reach_summary,
         }
         result[r['ad_archive_id']] = item
     return result

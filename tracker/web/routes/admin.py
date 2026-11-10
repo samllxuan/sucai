@@ -247,6 +247,12 @@ def admin_settings_save(
     try:
         region, country = resolve_scope(collect_country, dict(i18n.countries(i18n.DEFAULT_LANGUAGE)))
     except ValueError:
+        current = db.get_app_settings() or {}
+        db.update_app_settings(
+            collect_interval_hours=interval,
+            collect_country=current.get("collect_country") or "US",
+            collect_region=current.get("collect_region"),
+        )
         return JSONResponse({'error': '请选择有效国家或区域'}, status_code=400)
     if region and (db.get_app_settings() or {}).get('collect_source') == 'apify':
         return JSONResponse({'error': '欧洲区域请通过“开始采集”使用公开浏览器通道'}, status_code=400)

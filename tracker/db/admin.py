@@ -10,33 +10,40 @@ from .base import connect, resolve_media_url
 from .settings import STALE_MINUTES
 
 
-def list_pages(company_id: int | None = None) -> list[dict]:
+def list_pages(company_id: int | None = None, platform: str | None = None) -> list[dict]:
     """Tracked pages (all, or for one company). Feeds the admin/companies UI."""
     with connect() as conn:
-        if company_id is None:
-            return conn.execute(
-                """SELECT p.id, p.company_id, c.name AS company_name, p.page_id,
-                          p.page_name, p.page_url, p.is_tracked
-                   FROM pages p JOIN companies c ON c.id = p.company_id
-                   ORDER BY c.name, p.page_name""",
-            ).fetchall()
+        clauses, params = [], []
+        if company_id is not None:
+            clauses.append("p.company_id = %s")
+            params.append(company_id)
+        if platform is not None:
+            clauses.append("p.platform = %s")
+            params.append(platform)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         return conn.execute(
-            """SELECT id, company_id, page_id, page_name, page_url, is_tracked
-               FROM pages WHERE company_id = %s ORDER BY page_name""",
-            (company_id,),
+            """SELECT p.id, p.company_id, c.name AS company_name, p.page_id,
+                      p.page_name, p.page_url, p.is_tracked, p.platform
+               FROM pages p JOIN companies c ON c.id = p.company_id""" + where +
+            " ORDER BY c.name, p.page_name",
+            params,
         ).fetchall()
 
 
-def list_companies_with_pages() -> list[dict]:
+def list_companies_with_pages(platform: str | None = None) -> list[dict]:
     """Companies with their pages nested (for the admin UI)."""
     with connect() as conn:
         companies = conn.execute("SELECT id, name, domain FROM companies ORDER BY name").fetchall()
         # has_ads: the page ID is locked (see `update_page`)
+        where, params = "", []
+        if platform is not None:
+            where, params = " WHERE platform = %s", [platform]
         pages = conn.execute(
             """SELECT id, company_id, page_id, page_name, collect_country, is_tracked,
-                      profile_picture_url, profile_picture_key, like_count, categories,
+                      profile_picture_url, profile_picture_key, like_count, categories, platform,
                       EXISTS (SELECT 1 FROM ads WHERE ads.page_ref_id = pages.id) AS has_ads
-               FROM pages ORDER BY page_name"""
+               FROM pages""" + where + " ORDER BY page_name",
+            params,
         ).fetchall()
     for p in pages:
         # the Page's picture: mirrored copy, else Meta's (expiring) URL, else None
@@ -76,22 +83,25 @@ def delete_company(company_id: int) -> bool:
 
 
 def create_page(company_id: int, page_id: str, page_name: str | None = None,
-                collect_country: str | None = None) -> dict:
+                collect_country: str | None = None, platform: str = "meta") -> dict:
     """Register/relocate a Page. Re-adding a page_id moves it to this company
     (lets you 'unify' pages under one company). A name given here is the admin's
     and is kept over the name from Facebook. `collect_country` None = the default."""
     with connect() as conn:
         return conn.execute(
-            """INSERT INTO pages (company_id, page_id, page_name, page_name_from_admin, collect_country)
-               VALUES (%(company_id)s, %(page_id)s, %(name)s, %(name)s::text IS NOT NULL, %(country)s)
+            """INSERT INTO pages
+                   (company_id, page_id, page_name, page_name_from_admin, collect_country, platform)
+               VALUES (%(company_id)s, %(page_id)s, %(name)s,
+                       %(name)s::text IS NOT NULL, %(country)s, %(platform)s)
                ON CONFLICT (page_id) DO UPDATE SET
                    company_id = EXCLUDED.company_id,
                    page_name = COALESCE(EXCLUDED.page_name, pages.page_name),
                    page_name_from_admin = EXCLUDED.page_name_from_admin OR pages.page_name_from_admin,
-                   collect_country = EXCLUDED.collect_country
+                   collect_country = EXCLUDED.collect_country,
+                   platform = EXCLUDED.platform
                RETURNING id""",
             {"company_id": company_id, "page_id": page_id.strip(), "name": page_name or None,
-             "country": collect_country or None},
+             "country": collect_country or None, "platform": platform},
         ).fetchone()
 
 

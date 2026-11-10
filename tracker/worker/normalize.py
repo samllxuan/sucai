@@ -1,15 +1,17 @@
 """One shape for a collected Ad, whatever the Collection source.
 
-Both sources hand us the same thing underneath: Meta's Ad Library record for one
+Meta's sources hand us the same thing underneath: Meta's Ad Library record for one
 ad (a `collated_results[]` node, with the creative under `snapshot`).
   - Self-hosted: `meta_ads_collector`'s `Ad` keeps that record in `ad.raw_data`
     (the snapshot keys are also copied to the top level).
   - Apify: each dataset item *is* that record, with `snapshot` nested.
 
-So both adapters go through one parser of the record, `from_meta_record`, and
+Meta adapters go through one parser of the record, `from_meta_record`, and
 `persist.upsert_ad` only ever sees a `NormalizedAd`. The library's own model is a
 fallback for an `Ad` without `raw_data`; it drops fields we need
 (display_format, caption, the Page's picture/likes/categories).
+
+TikTok's public web API has a different shape, parsed by `from_tiktok_record`.
 """
 
 from __future__ import annotations
@@ -54,6 +56,8 @@ class NormalizedPage:
 class NormalizedAd:
     id: str
     page: NormalizedPage
+    platform: str = "meta"
+    external_ad_id: str | None = None
     is_active: bool | None = None
     ad_status: str | None = None
     delivery_start_time: datetime | None = None
@@ -71,6 +75,15 @@ class NormalizedAd:
     creatives: list[NormalizedCreative] = field(default_factory=list)
     search_country: str | None = None  # observation scope, never complete coverage
     reported_countries: list[str] = field(default_factory=list)
+    advertiser_name: str | None = None
+    advertiser_id: str | None = None
+    registry_location: str | None = None
+    sponsor: str | None = None
+    coverage_data: dict | None = None
+    coverage_countries: list[str] = field(default_factory=list)
+    coverage_status: str | None = None
+    coverage_source: str | None = None
+    coverage_checked_at: datetime | None = None
 
 
 # ── Parsing Meta's record ───────────────────────────────────────────────────
@@ -83,12 +96,15 @@ def _text(value: Any) -> str | None:
 
 
 def _epoch(value: Any) -> datetime | None:
-    """Meta's dates are epoch seconds (UTC)."""
+    """Epoch timestamps from Meta (seconds) or TikTok (milliseconds)."""
     if value in (None, ""):
         return None
     try:
         if isinstance(value, (int, float)) or (isinstance(value, str) and value.isdigit()):
-            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+            epoch = float(value)
+            if epoch > 10_000_000_000:
+                epoch /= 1000
+            return datetime.fromtimestamp(epoch, tz=timezone.utc)
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (ValueError, TypeError, OverflowError):
         return None
@@ -157,6 +173,8 @@ def from_meta_record(rec: dict) -> NormalizedAd:
 
     return NormalizedAd(
         id=str(rec.get("ad_archive_id") or rec.get("id") or ""),
+        platform="meta",
+        external_ad_id=str(rec.get("ad_archive_id") or rec.get("id") or "") or None,
         page=NormalizedPage(
             id=str(rec.get("page_id") or snap.get("page_id") or "") or None,
             name=rec.get("page_name") or snap.get("page_name"),
@@ -205,6 +223,8 @@ def _from_library_model(ad) -> NormalizedAd:
     page = getattr(ad, "page", None)
     return NormalizedAd(
         id=str(ad.id),
+        platform="meta",
+        external_ad_id=str(ad.id),
         page=NormalizedPage(
             id=getattr(page, "id", None) or None,
             name=getattr(page, "name", None) or None,
@@ -235,6 +255,210 @@ def _from_library_model(ad) -> NormalizedAd:
             )
             for c in (ad.creatives or [])
         ]),
+    )
+
+
+# ── Parsing TikTok's public web API ─────────────────────────────────────────
+
+def _first(value: Any) -> Any:
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _url(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        for key in ("url", "video_url", "cover_url", "image_url", "display_url"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return None
+
+
+def _number(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str):
+        digits = value.strip().replace(",", "")
+        if digits.isdigit():
+            return int(digits)
+    return None
+
+
+def _tiktok_advertiser_id(advertiser: dict) -> str | None:
+    value = (advertiser.get("adv_biz_ids") or advertiser.get("adv_biz_id")
+             or advertiser.get("business_id"))
+    if isinstance(value, list):
+        value = next((v for v in value if isinstance(v, (str, int)) and str(v).strip()), None)
+    if isinstance(value, (str, int)) and str(value).strip():
+        return str(value).strip()
+    return None
+
+
+def _tiktok_page_id(advertiser: dict, name: str | None) -> str:
+    advertiser_id = _tiktok_advertiser_id(advertiser)
+    if advertiser_id:
+        return f"tt_advertiser:{advertiser_id}"
+    if name:
+        import hashlib
+        digest = hashlib.sha1(name.casefold().encode("utf-8")).hexdigest()[:16]
+        return f"tt_advertiser:{digest}"
+    return "tt_advertiser:unknown"
+
+
+def _tiktok_creative(ad: dict, coverage: dict | None) -> NormalizedCreative | None:
+    videos = ad.get("videos") or []
+    images = ad.get("image_urls") or ad.get("images") or []
+    video = _first(videos)
+    image = _first(images)
+    video_url = _url(video)
+    thumbnail_url = (
+        _url(video.get("cover_img"))
+        if isinstance(video, dict) else None
+    )
+    image_url = _url(image)
+    body = None
+    for value in (
+        ad.get("title"),
+        ad.get("description"),
+    ):
+        if isinstance(value, str) and value.strip():
+            body = value
+            break
+    title = ad.get("title")
+    link_url = ad.get("external_url") if isinstance(ad.get("external_url"), str) else None
+    if not any((body, title, image_url, video_url, thumbnail_url, link_url)):
+        return None
+    return NormalizedCreative(
+        body=body if isinstance(body, str) else None,
+        title=title if isinstance(title, str) else None,
+        description=(ad.get("description") if isinstance(ad.get("description"), str) else None),
+        caption=(ad.get("sponsor") if isinstance(ad.get("sponsor"), str) else None),
+        link_url=link_url,
+        image_url=image_url,
+        video_url=video_url,
+        video_hd_url=video_url,
+        thumbnail_url=thumbnail_url,
+        cta_text=(ad.get("call_to_action") or ad.get("cta")),
+        cta_type=ad.get("advertising_objective"),
+    )
+
+
+def _tiktok_coverage(detail: dict) -> tuple[dict, list[str]]:
+    data = detail.get("data") or {}
+    ad = data.get("ad") or {}
+    targeting = data.get("targeting") or {}
+    location = targeting.get("location") or {}
+    locations = location.get("data") or []
+    countries: set[str] = set()
+    regions = []
+    for location_row in locations if isinstance(locations, list) else []:
+        if not isinstance(location_row, dict):
+            continue
+        code = str(location_row.get("region") or location_row.get("country") or "").upper()
+        if len(code) != 2:
+            continue
+        countries.add(code)
+        rows = []
+        for breakdown in location_row.get("breakdowns") or []:
+            if not isinstance(breakdown, dict):
+                continue
+            gender = str(breakdown.get("gender") or "").upper()
+            raw_reach = breakdown.get("impressions") or breakdown.get("reach")
+            reach = _number(raw_reach)
+            if reach is None and not (
+                isinstance(raw_reach, str) and raw_reach.strip()
+            ):
+                continue
+            row = {"country": code, "age": str(breakdown.get("age") or "未注明"),
+                   "male": None, "female": None, "unknown": None}
+            key = {"MALE": "male", "FEMALE": "female"}.get(gender, "unknown")
+            row[key] = reach if reach is not None else raw_reach.strip()
+            rows.append(row)
+        raw_locations_reach = location_row.get("impressions")
+        reach = _number(raw_locations_reach)
+        if reach is None and isinstance(raw_locations_reach, str) and raw_locations_reach.strip():
+            reach = raw_locations_reach.strip()
+        regions.append({"region": code, "reach": reach, "rows": rows})
+    raw_total_impressions = (
+        ad.get("total_impressions")
+        or location.get("total_impressions")
+        or ad.get("estimated_audience")
+    )
+    total_impressions = _number(raw_total_impressions)
+    if total_impressions is None and isinstance(raw_total_impressions, str):
+        total_impressions = raw_total_impressions.strip() or None
+    raw = {
+        "estimated_audience": ad.get("estimated_audience"),
+        "total_impressions": total_impressions,
+        "location_total_region": location.get("total_region"),
+        "locations": locations,
+    }
+    if regions:
+        raw["regions"] = regions
+    return raw, sorted(countries)
+
+
+def from_tiktok_record(detail: dict) -> NormalizedAd:
+    """Parse a TikTok Ad Library item-details response."""
+    data = detail.get("data") if isinstance(detail, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError("TikTok 详情缺少 data")
+    ad = data.get("ad")
+    advertiser = data.get("advertiser")
+    if not isinstance(ad, dict) or not isinstance(advertiser, dict):
+        raise ValueError("TikTok 详情缺少广告或广告主")
+    external_id = str(ad.get("id") or "").strip()
+    if not external_id.isdigit():
+        raise ValueError("TikTok 详情缺少有效广告 ID")
+    advertiser_name = (advertiser.get("name") or advertiser.get("display_name")
+                       or ad.get("advertiser_name"))
+    if not isinstance(advertiser_name, str):
+        advertiser_name = None
+    page_id = _tiktok_page_id(advertiser, advertiser_name)
+    coverage_data, countries = _tiktok_coverage(detail)
+    creative = _tiktok_creative(ad, coverage_data)
+    first_shown = _epoch(ad.get("first_shown_date"))
+    last_shown = _epoch(ad.get("last_shown_date"))
+    status = "ACTIVE"
+    is_active = True
+    title = ad.get("title") if isinstance(ad.get("title"), str) else None
+    body = title or (ad.get("name") if isinstance(ad.get("name"), str) else None)
+    checked_at = datetime.now(timezone.utc)
+    return NormalizedAd(
+        id=f"tt_{external_id}",
+        platform="tiktok",
+        external_ad_id=external_id,
+        page=NormalizedPage(
+            id=page_id,
+            name=advertiser_name,
+            profile_picture_url=_url(advertiser.get("avatar_url") or advertiser.get("logo_url")),
+            profile_uri=advertiser.get("profile_url"),
+        ),
+        is_active=is_active,
+        ad_status=status or None,
+        delivery_start_time=first_shown,
+        delivery_stop_time=None,
+        snapshot_url=f"https://library.tiktok.com/ads/detail/?ad_id={external_id}",
+        publisher_platforms=["TikTok"],
+        ad_type=ad.get("advertising_objective"),
+        body=body,
+        creatives=_with_card_keys([creative] if creative else []),
+        reported_countries=countries,
+        advertiser_name=advertiser_name,
+        advertiser_id=_tiktok_advertiser_id(advertiser),
+        registry_location=(advertiser.get("registry_location")
+                           if isinstance(advertiser.get("registry_location"), str) else None),
+        sponsor=(advertiser.get("sponsor") if isinstance(advertiser.get("sponsor"), str) else None),
+        coverage_data=coverage_data,
+        coverage_countries=countries,
+        coverage_status="available",
+        coverage_source="tiktok_ad_library",
+        coverage_checked_at=checked_at,
     )
 
 

@@ -78,6 +78,7 @@
         <h2 style="font-size:18px;margin:0 0 8px">一句话剧情简介</h2>
         {% if synopsis %}<p>{{ synopsis[0] }}</p><p class="small">根据第三方公开剧情介绍整理 · <a href="{{ synopsis[1] }}" target="_blank" rel="noopener noreferrer">查看来源</a></p>{% else %}<p>暂无经过核实的剧情简介。</p>{% endif %}
       </section>
+      {% if is_meta %}
       <section id="coverage-refresh" style="padding:18px;margin-bottom:20px;border:1px solid var(--hair);border-radius:10px">
         <h2 style="font-size:18px;margin:0 0 8px">Meta 公开覆盖详情</h2>
         <p style="line-height:1.6">重新读取此广告的欧盟／英国覆盖人数和地区明细。请求可能需要一分钟；失败不会清除已有数值。</p>
@@ -85,6 +86,7 @@
         {% if request.query_params.get('coverage_refresh') == 'failed' %}<p role="alert">读取失败，请稍后重试；已有覆盖数据已保留。</p>{% endif %}
         <form method="post" action="/ads/{{ ad.ad_archive_id|urlencode }}/refresh-coverage"><button type="submit" style="margin-top:8px;padding:8px 14px">重新读取覆盖详情</button></form>
       </section>
+      {% endif %}
       <section id="research-notes" style="padding:18px;margin-bottom:20px;border:1px solid var(--hair);border-radius:10px">
         <h2 style="font-size:18px;margin:0 0 12px">素材研究备注</h2>
         {% if request.query_params.get('annotation_saved') %}<p role="status">已保存</p>{% endif %}
@@ -138,14 +140,25 @@
       {% endif %}
 
       <div class="facts">
+        <div class="f"><span class="k">广告平台</span><span class="v">{{ 'TikTok' if ad.platform == 'tiktok' else 'Meta' }}</span></div>
+        {% if ad.platform == 'tiktok' %}
+        <div class="f"><span class="k">TikTok 广告 ID</span><span class="v tnum mono">{{ ad.external_ad_id or '未获取' }}</span></div>
+        {% if ad.advertiser_name %}<div class="f"><span class="k">广告主</span><span class="v">{{ ad.advertiser_name }}</span></div>{% endif %}
+        {% if ad.advertiser_id %}<div class="f"><span class="k">广告主 ID</span><span class="v tnum mono">{{ ad.advertiser_id }}</span></div>{% endif %}
+        {% if ad.registry_location %}<div class="f"><span class="k">注册地区</span><span class="v">{{ ad.registry_location }}</span></div>{% endif %}
+        {% if ad.sponsor %}<div class="f"><span class="k">赞助方</span><span class="v">{{ ad.sponsor }}</span></div>{% endif %}
+        {% endif %}
         <div class="f"><span class="k">广告上线日期</span><span class="v tnum">{{ ad.delivery_start or '未公开' }}</span></div>
         <div class="f"><span class="k">本站收录日期</span><span class="v tnum">{{ ad.first_seen or '未获取' }}</span></div>
         {% if ad.delivery_stop %}<div class="f"><span class="k">停止投放日期</span><span class="v tnum">{{ ad.delivery_stop }}</span></div>{% endif %}
         {% set pm = ad.public_metadata %}
         <div class="f"><span class="k">公开覆盖国家</span><span class="v">{{ pm.coverage_country_names|join('、') if pm.coverage_country_names else '未获取' }}{% if pm.coverage_countries %}（{{ pm.coverage_countries|length }} 个，限已披露地区）{% endif %}</span></div>
         <div class="f"><span class="k">搜索命中国家</span><span class="v">{{ pm.observed_country_names|join('、') if pm.observed_country_names else '未记录' }}（搜索记录，不代表完整覆盖）</span></div>
-        {% if pm.reported_country_names %}<div class="f"><span class="k">Meta 标注国家</span><span class="v">{{ pm.reported_country_names|join('、') }}（定向或覆盖）</span></div>{% endif %}
-        {% for r in pm.reach_summary %}{% if r.reach is not none %}<div class="f"><span class="k">{{ '欧盟' if r.region == 'EU' else '英国' }}覆盖人数</span><span class="v tnum">{{ '{:,}'.format(r.reach) }}（Meta 估算）</span></div>{% endif %}{% endfor %}
+        {% if pm.reported_country_names %}<div class="f"><span class="k">{{ 'TikTok' if ad.platform == 'tiktok' else 'Meta' }} 标注国家</span><span class="v">{{ pm.reported_country_names|join('、') }}（定向或覆盖）</span></div>{% endif %}
+        {% for r in pm.reach_summary %}{% if r.reach is not none %}
+        {% set region_name = r.region_name or r.region %}
+        <div class="f"><span class="k">{{ region_name }}覆盖人数</span><span class="v tnum">{{ '{:,}'.format(r.reach) if r.reach is number else r.reach }}（{{ 'TikTok' if ad.platform == 'tiktok' else 'Meta' }} 估算）</span></div>
+        {% endif %}{% endfor %}
         <div class="f"><span class="k">覆盖数据状态</span><span class="v">{{ {'not_checked':'待读取','available':'已获取','empty':'本次未返回公开覆盖数据','failed':'本次读取失败，已有数据保留'}.get(pm.coverage_status,'未获取') }}</span></div>
         {% if pm.coverage_checked_at %}<div class="f"><span class="k">覆盖数据来源与时间</span><span class="v">{{ pm.coverage_source }} · {{ pm.coverage_checked_at[:19]|replace('T',' ') }} UTC</span></div>{% endif %}
         {% if pm.coverage_error %}<div class="f"><span class="k">覆盖读取提示</span><span class="v">{{ pm.coverage_error }}</span></div>{% endif %}
@@ -162,11 +175,11 @@
 
       <section style="margin:24px 0;padding:18px;border:1px solid var(--hair);border-radius:10px" id="coverage-breakdown">
         <h2 style="font-size:18px;margin:0 0 8px">各国家与年龄、性别覆盖明细</h2>
-        <p style="line-height:1.6">Meta 披露的估计覆盖人数；“—”表示未披露，不表示 0。仅覆盖已公开的地区，不代表全球全部投放。</p>
+        <p style="line-height:1.6">{{ 'TikTok' if ad.platform == 'tiktok' else 'Meta' }} 披露的估计覆盖人数；“—”表示未披露，不表示 0。TikTok 可能只给出覆盖区间，系统会原样展示。仅覆盖已公开的地区，不代表全球全部投放。</p>
         {% for region in coverage_regions %}
-          <h3 style="font-size:16px;margin:16px 0 8px">{{ '欧盟' if region.region == 'EU' else ('英国' if region.region in ['GB','UK'] else region.region) }}{% if region.reach is not none %} · 总覆盖 {{ '{:,}'.format(region.reach) }}{% endif %}</h3>
+          <h3 style="font-size:16px;margin:16px 0 8px">{{ '欧盟' if region.region == 'EU' else ('英国' if region.region in ['GB','UK'] else (region.rows[0].country_name if region.rows else region.region)) }}{% if region.reach is not none %} · 总覆盖 {{ '{:,}'.format(region.reach) if region.reach is number else region.reach }}{% endif %}</h3>
           {% if region.rows %}<div style="overflow-x:auto;max-height:460px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;text-align:left"><thead><tr><th>国家 / 地区</th><th>年龄</th><th>男性</th><th>女性</th><th>未知性别</th></tr></thead><tbody>
-          {% for row in region.rows %}<tr><td>{{ row.country_name }}</td><td>{{ row.age or '未注明' }}</td>{% for key in ['male','female','unknown'] %}<td>{{ '{:,}'.format(row[key]) if row[key] is not none else '—' }}</td>{% endfor %}</tr>{% endfor %}
+          {% for row in region.rows %}<tr><td>{{ row.country_name }}</td><td>{{ row.age or '未注明' }}</td>{% for key in ['male','female','unknown'] %}<td>{{ '{:,}'.format(row[key]) if row[key] is number else (row[key] if row[key] is not none else '—') }}</td>{% endfor %}</tr>{% endfor %}
           </tbody></table></div>{% else %}<p>该地区没有返回年龄和性别明细。</p>{% endif %}
         {% else %}<p>暂无公开明细，可尝试重新读取覆盖详情。</p>{% endfor %}
       </section>
@@ -191,7 +204,7 @@
 
       <div class="cta-row">
         {% if ad.snapshot_url|safe_href %}
-        <a class="btn btn-primary" style="width:auto" href="{{ ad.snapshot_url|safe_href }}" target="_blank" rel="noopener noreferrer"><svg class="icon"><use href="#i-out"/></svg> {{ _("Meta Ad Library") }}</a>
+        <a class="btn btn-primary" style="width:auto" href="{{ ad.snapshot_url|safe_href }}" target="_blank" rel="noopener noreferrer"><svg class="icon"><use href="#i-out"/></svg> {{ 'TikTok Ad Library' if ad.platform == 'tiktok' else _('Meta Ad Library') }}</a>
         {% endif %}
         <a class="btn btn-ghost" href="/?company={{ ad.company_name|urlencode }}"><svg class="icon"><use href="#i-layers"/></svg> {{ _("More from %(company)s", company=ad.company_name) }}</a>
       </div>

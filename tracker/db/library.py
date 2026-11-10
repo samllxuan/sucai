@@ -36,6 +36,7 @@ EU_COUNTRY_CODES = frozenset(
 _AD_SUMMARY = """
 WITH ad_summary AS (
     SELECT a.id, a.ad_archive_id, COALESCE(a.is_active, FALSE) AS is_active,
+           a.platform, a.external_ad_id, a.advertiser_name,
            COALESCE(a.duration_days, 0) AS days,
            COALESCE(a.delivery_start_time, a.first_seen_at) AS started,
            a.delivery_start_time, a.delivery_stop_time, a.first_seen_at, a.last_seen_at,
@@ -196,6 +197,7 @@ def get_library_page(filters: LibraryFilters, sort: str = "dur", page: int = 0,
             )
             SELECT * FROM (
                 SELECT f.id, f.ad_archive_id, f.company, f.title, f.body, f.cta, f.media,
+                       f.platform, f.external_ad_id, f.advertiser_name,
                        f.formats, f.cards, f.display_format, f.page_name, f.avatar_raw, f.avatar_key,
                        f.versions, f.thumb_url, f.thumb_key, f.image_url, f.image_key,
                        g.active, g.days, g.rank, g.started, g.collected
@@ -213,7 +215,9 @@ def get_library_page(filters: LibraryFilters, sort: str = "dur", page: int = 0,
     for r in rows:
         hero = _hero(r)
         cards.append({
-            "id": r["ad_archive_id"], "co": r["company"], "days": r["days"], "rank": r["rank"],
+            "id": r["ad_archive_id"], "platform": r["platform"],
+            "external_ad_id": r["external_ad_id"], "advertiser_name": r["advertiser_name"],
+            "co": r["company"], "days": r["days"], "rank": r["rank"],
             "active": r["active"], "title": r["title"] or "", "body": r["body"] or "",
             "cta": r["cta"] or "", "media": r["media"], "formats": r["formats"],
             "kind": ad_kind(r["display_format"], r["media"]), "cards": r["cards"],
@@ -237,19 +241,34 @@ def get_library_summary(filters: LibraryFilters) -> dict:
             )
             , measured AS (
                 SELECT f.*, reach.reach AS ad_reach,
-                       gender.gender_rows, gender.male, gender.female, gender.unknown
+                       gender.gender_rows, gender.male, gender.female, gender.unknown,
+                       CASE WHEN COALESCE(gender.total_rows, 0) = 0 THEN TRUE
+                            ELSE gender.numeric_rows = gender.total_rows END AS gender_complete
                 FROM filtered f
                 LEFT JOIN LATERAL (
-                    SELECT SUM((region->>'reach')::bigint) AS reach
+                    SELECT CASE
+                               WHEN COUNT(*) > 0
+                                AND COUNT(*) FILTER (
+                                    WHERE jsonb_typeof(region->'reach') <> 'number'
+                                ) = 0
+                               THEN SUM(CASE WHEN jsonb_typeof(region->'reach') = 'number'
+                                             THEN (region->>'reach')::bigint END)
+                           END AS reach
                     FROM ads a
                     CROSS JOIN LATERAL jsonb_array_elements(
                         CASE WHEN jsonb_typeof(a.coverage_data->'regions') = 'array'
                              THEN a.coverage_data->'regions' ELSE '[]'::jsonb END
                     ) AS region
-                    WHERE a.id = f.id AND jsonb_typeof(region->'reach') = 'number'
+                    WHERE a.id = f.id
                 ) reach ON TRUE
                 LEFT JOIN LATERAL (
-                    SELECT COUNT(*) FILTER (
+                    SELECT COUNT(*) AS total_rows,
+                           COUNT(*) FILTER (
+                               WHERE jsonb_typeof(gender_row->'male') = 'number'
+                                  OR jsonb_typeof(gender_row->'female') = 'number'
+                                  OR jsonb_typeof(gender_row->'unknown') = 'number'
+                           ) AS numeric_rows,
+                           COUNT(*) FILTER (
                                WHERE jsonb_typeof(gender_row->'male') = 'number'
                                   OR jsonb_typeof(gender_row->'female') = 'number'
                                   OR jsonb_typeof(gender_row->'unknown') = 'number'
@@ -278,10 +297,13 @@ def get_library_summary(filters: LibraryFilters) -> dict:
                        COUNT(*) FILTER (WHERE ad_reach IS NOT NULL)::bigint AS coverage_ad_count,
                        MIN(delivery_start_time) AS earliest_launch,
                        CASE WHEN COALESCE(SUM(gender_rows), 0) > 0
+                                  AND BOOL_AND(gender_complete)
                             THEN COALESCE(SUM(male), 0)::bigint END AS male,
                        CASE WHEN COALESCE(SUM(gender_rows), 0) > 0
+                                  AND BOOL_AND(gender_complete)
                             THEN COALESCE(SUM(female), 0)::bigint END AS female,
                        CASE WHEN COALESCE(SUM(gender_rows), 0) > 0
+                                  AND BOOL_AND(gender_complete)
                             THEN COALESCE(SUM(unknown), 0)::bigint END AS unknown
                 FROM measured
             )
@@ -310,12 +332,12 @@ def get_library_summary(filters: LibraryFilters) -> dict:
                        ORDER BY 1
                    ) AS region_codes,
                    ARRAY(
-                       SELECT DISTINCT platform
+                       SELECT DISTINCT publisher.platform
                        FROM filtered f
                        CROSS JOIN LATERAL unnest(
                            COALESCE(f.publisher_platforms, ARRAY[]::text[])
                        ) AS publisher(platform)
-                       WHERE btrim(platform) <> ''
+                       WHERE btrim(publisher.platform) <> ''
                        ORDER BY 1
                    ) AS publishers,
                    ARRAY(
@@ -423,8 +445,15 @@ def iter_ads_for_export(filters: LibraryFilters):
             cur.itersize = 500
             cur.execute(_AD_SUMMARY + f"SELECT * FROM ad_summary WHERE {where} ORDER BY {_ORDER['dur']}", params)
             for r in cur:
+                library_url = (
+                    f"https://library.tiktok.com/ads/detail/?ad_id={r['external_ad_id']}"
+                    if r["platform"] == "tiktok"
+                    else f"https://www.facebook.com/ads/library/?id={r['ad_archive_id']}"
+                )
                 yield {
                     "ad_archive_id": r["ad_archive_id"],
+                    "platform": r["platform"],
+                    "external_ad_id": r["external_ad_id"] or "",
                     "company": r["company"],
                     "page_id": r["page_id"] or "",
                     "page_name": r["page_name"] or "",
@@ -446,7 +475,7 @@ def iter_ads_for_export(filters: LibraryFilters):
                     "cta": r["cta"] or "",
                     "destination_url": r["link_url"] or "",
                     "landing_page_url": r["landing_page_url"] or "",
-                    "ad_library_url": f"https://www.facebook.com/ads/library/?id={r['ad_archive_id']}",
+                    "ad_library_url": library_url,
                     "disclosed_coverage_countries": ';'.join(r['coverage_countries']),
                     "search_observed_countries": ';'.join(r['observed_countries']),
                     "meta_targeted_or_reached_countries": ';'.join(r['reported_countries']),

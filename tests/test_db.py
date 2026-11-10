@@ -569,7 +569,7 @@ def test_a_stopped_worker_closes_its_run_on_the_way_out(seeded, db, monkeypatch)
 
 def test_what_fails_after_collecting_is_an_error_of_the_run(seeded, db, monkeypatch):
     from tracker import db as dbmod
-    from tracker.worker import linking, persist, resolver, scheduler
+    from tracker.worker import disclosures, linking, persist, resolver, scheduler
     from tracker.worker.persist import MirrorResult, RunProgress
 
     def fake_collection(trigger, resume=None):
@@ -582,6 +582,10 @@ def test_what_fails_after_collecting_is_an_error_of_the_run(seeded, db, monkeypa
     monkeypatch.setattr(scheduler, "run_collection", fake_collection)
     monkeypatch.setattr(persist, "mirror_pending_media",
                         lambda conn, **kw: MirrorResult(8, 10, 2, "AccessDenied"))
+    monkeypatch.setattr(
+        disclosures, "refresh_pending",
+        lambda on_progress=None: {"checked": 0, "failed": 0},
+    )
     monkeypatch.setattr(linking, "run_linking", lambda: 0)
     monkeypatch.setattr(resolver, "run_resolve", lambda on_progress=None: None)
     scheduler._run_once("manual")

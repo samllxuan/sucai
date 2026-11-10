@@ -29,7 +29,7 @@ def library_filters(request: Request) -> db.LibraryFilters:
     days = q.get("min_days", "").strip()
     return db.LibraryFilters(
         companies=selected_companies(request), media=q.get("media", ""),
-        status=q.get("status", "all"), min_days=int(days) if days.isdigit() else 0,
+        status=q.get("status", "active"), min_days=int(days) if days.isdigit() else 0,
         q=q.get("q", ""), collected_app=q.get('collected_app',''),
     )
 
@@ -135,6 +135,7 @@ def ad_detail(request: Request, ad_archive_id: str):
     return templates.TemplateResponse(request, "detail.html", {
         "ad": ad, "title": title, "body": body, "cta": cta,
         "annotation": annotation, "coverage_regions": coverage_regions, "synopsis": synopsis,
+        "is_meta": ad["platform"] == "meta",
         "tier_class": tier_class, "tier_label": tier_label,
         "platforms_label": platforms_label,
         "likes_label": compact_number(ad["page"]["like_count"], request_lang(request)),
@@ -181,9 +182,14 @@ def refresh_coverage_from_detail(request: Request, ad_archive_id: str):
     from ...worker.disclosures import refresh_ads
     import asyncio
     with db.connect() as conn:
-        row=conn.execute("SELECT id,ad_archive_id,page_id FROM ads WHERE ad_archive_id=%s",(ad_archive_id,)).fetchone()
+        row=conn.execute(
+            "SELECT id,ad_archive_id,page_id,platform FROM ads WHERE ad_archive_id=%s",
+            (ad_archive_id,),
+        ).fetchone()
     if not row:
         return JSONResponse({"error":"广告不存在"},status_code=404)
+    if row["platform"] != "meta":
+        return JSONResponse({"error":"只有 Meta 广告支持重新读取公开覆盖详情"},status_code=409)
     result=asyncio.run(refresh_ads([row]))
     status="failed" if result.get("failed") else "done"
     return RedirectResponse("/ads/"+quote(ad_archive_id,safe="")+"?coverage_refresh="+status+"#coverage-refresh",status_code=303)

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,7 +38,13 @@ from .. import apify, db
 from ..collection_scopes import REGIONS, browser_targets
 from ..collection_window import launch_window, in_launch_window
 from . import persist
-from .normalize import NormalizedAd, from_apify_item, from_library_ad, from_meta_record
+from .normalize import (
+    NormalizedAd,
+    from_apify_item,
+    from_library_ad,
+    from_meta_record,
+    from_tiktok_record,
+)
 from .persist import RunProgress
 
 logger = logging.getLogger(__name__)
@@ -65,6 +72,13 @@ def _default_make_collector(proxy):
 
 def _default_make_apify(token: str):
     return apify.ApifyRuns(token)
+
+
+def _default_make_tiktok(proxy=None):
+    from .tiktok_browser import TikTokBrowser
+
+    proxy = os.getenv("TIKTOK_PROXY", "").strip() or proxy
+    return TikTokBrowser(proxy=proxy)
 
 
 def default_download_session():
@@ -131,12 +145,13 @@ class _Run:
         """After a Page: only when it was read in full are the ads that didn't show
         up gone. Its name follows Facebook's."""
         pg = tally.page
-        if complete:
+        is_meta_page = pg.get("platform", "meta") == "meta"
+        if complete and is_meta_page:
             gone = persist.mark_disappeared_ads(self.conn, pg["id"], self.run_id)
             if gone:
                 logger.info("run %s: page %s: %d ad(s) disappeared", self.run_id, pg["page_id"], gone)
-            if tally.page_name:
-                db.update_page_name(pg["id"], tally.page_name)
+        if tally.page_name:
+            db.update_page_name(pg["id"], tally.page_name)
         if tally.seen:
             self.companies_seen.add(pg["company_id"])
         self.progress.companies = len(self.companies_seen)
@@ -276,19 +291,124 @@ async def _collect_browser(run: _Run, pages: list[dict], settings: dict,
         await browser.close()
 
 
-def _discover_page(run: _Run, page_id: str, name: str | None, country: str) -> dict:
+async def _collect_tiktok(run: _Run, settings: dict, make_tiktok,
+                          proxies=()) -> None:
+    """Read TikTok's public Ad Library through one browser-backed search."""
+    from .tiktok_browser import TIKTOK_COUNTRIES
+
+    if settings.get("collect_mode", "keyword") != "keyword":
+        raise ValueError("TikTok 采集仅支持关键词搜索")
+    if settings.get("collect_match_mode", "exact") != "exact":
+        raise ValueError("TikTok 采集仅支持完整短语匹配")
+    if settings.get("collect_ad_status", "ACTIVE") != "ACTIVE":
+        raise ValueError("TikTok 公开广告库采集仅支持投放中的广告")
+    if settings.get("collect_region"):
+        raise ValueError("TikTok 采集暂不支持区域批量搜索，请选择单个国家")
+
+    keyword = settings.get("collect_keyword", "").strip()
+    if not 1 <= len(keyword) <= 200:
+        raise ValueError("请输入 1–200 个字符的搜索关键词")
+    country = (settings.get("collect_country") or "").upper()
+    if country not in TIKTOK_COUNTRIES:
+        raise ValueError(f"TikTok 公开广告库暂不支持国家 {country or '（未选择）'}")
+    launch_days = int(settings.get("collect_launch_days", 30))
+    launch_from, launch_to = launch_window(launch_days)
+    limit = max(1, min(200, int(settings.get("self_hosted_max_ads") or 30)))
+
+    window_label = (
+        "TikTok默认最近30天" if not launch_from else f"上线={launch_from}至{launch_to}"
+    )
+    scope = f"keyword; {country}; ACTIVE; exact; limit={limit}; {window_label}"
+    run.ranked = False
+    run.conn.execute(
+        """UPDATE collection_runs
+           SET pages_total=1, collection_method=%s, scope=%s, search_keyword=%s
+           WHERE id=%s""",
+        ("tiktok_public_browser", scope, keyword, run.run_id),
+    )
+    run.conn.commit()
+    run.progress.current_step = f"TikTok 公开广告库：{keyword} · {country}"
+    run.progress.current_page_ads = 0
+    run.beat()
+
+    browser = make_tiktok(proxy=proxies[0] if proxies else None)
+    tallies: dict[str, _PageTally] = {}
+    try:
+        records, complete = await asyncio.wait_for(
+            browser.search(
+                keyword,
+                country,
+                limit,
+                ad_status="ACTIVE",
+                search_mode="exact",
+                launch_from=launch_from,
+                launch_to=launch_to,
+            ),
+            timeout=180,
+        )
+        if not complete:
+            run.progress.partial_pages += 1
+        for detail in records:
+            ad = from_tiktok_record(detail)
+            if ad.platform != "tiktok" or not ad.id.startswith("tt_"):
+                raise ValueError("TikTok 详情平台或广告 ID 无效")
+            ad.search_country = country
+            page_key = ad.page.id or "tt_advertiser:unknown"
+            if page_key not in tallies:
+                target = _discover_page(
+                    run, page_key, ad.page.name, country, platform="tiktok"
+                )
+                tallies[page_key] = _PageTally(target)
+            tally = tallies[page_key]
+            run.store(tally, ad)
+            run.progress.current_page_ads += 1
+            run.beat()
+            if tally.seen % _PROGRESS_LOG_EVERY == 0:
+                logger.info(
+                    "run %s: TikTok search: %d ad(s) so far (%d new)",
+                    run.run_id, run.progress.total, run.progress.new,
+                )
+        for tally in tallies.values():
+            run.page_done(tally, False)
+    except Exception as exc:
+        message = (
+            "读取超时，请重试"
+            if isinstance(exc, asyncio.TimeoutError)
+            else str(exc).splitlines()[0][:350]
+        )
+        run.fail(f"TikTok ({country}): {message}")
+        logger.warning("run %s: TikTok search failed: %s", run.run_id, message)
+    finally:
+        try:
+            await browser.close()
+        finally:
+            run.progress.pages_done = 1
+            run.progress.current_step = None
+            run.progress.current_page_ads = 0
+            run.beat()
+
+
+def _discover_page(run: _Run, page_id: str, name: str | None, country: str,
+                   platform: str = "meta") -> dict:
     """Keyword discovery: preserve existing company associations; add new pages paused."""
-    row = run.conn.execute('SELECT id, company_id, page_id, page_name, collect_country FROM pages WHERE page_id=%s',
-                           (page_id,)).fetchone()
+    row = run.conn.execute(
+        """SELECT id, company_id, page_id, page_name, collect_country, platform
+           FROM pages WHERE page_id=%s""",
+        (page_id,),
+    ).fetchone()
     if row:
         run.conn.commit()
         return row
+    fallback = "TikTok" if platform == "tiktok" else "Meta"
     company = run.conn.execute('INSERT INTO companies (name) VALUES (%s) RETURNING id',
-                               (name or f'Meta {page_id}',)).fetchone()
-    row = run.conn.execute('''INSERT INTO pages (company_id,page_id,page_name,collect_country,is_tracked)
-                             VALUES (%s,%s,%s,%s,FALSE)
-                             RETURNING id,company_id,page_id,page_name,collect_country''',
-                            (company['id'],page_id,name,country)).fetchone()
+                               (name or f'{fallback} {page_id}',)).fetchone()
+    row = run.conn.execute(
+        '''INSERT INTO pages
+               (company_id,page_id,page_name,collect_country,is_tracked,platform)
+           VALUES (%s,%s,%s,%s,FALSE,%s)
+           RETURNING id,company_id,page_id,page_name,collect_country,platform''',
+        (company['id'], page_id, name, country, platform),
+    ).fetchone()
     run.conn.commit()
     return row
 
@@ -574,19 +694,31 @@ def _resume(conn, run_id: int, tracked: list[dict], default_country: str):
 # ── The run ─────────────────────────────────────────────────────────────────
 
 async def _collect_run(conn, *, make_collector=_default_make_collector, make_apify=_default_make_apify,
-                       trigger: str = "manual", resume: int | None = None, settings_override=None) -> tuple[int, RunProgress]:
+                       make_tiktok=_default_make_tiktok, trigger: str = "manual",
+                       resume: int | None = None,
+                       settings_override=None) -> tuple[int, RunProgress]:
     settings = db.get_app_settings() or {}
     if settings_override:
         settings = {**settings, **settings_override}
+    platform = settings.get("collect_platform") or "meta"
     source = "apify" if resume is not None else settings.get("collect_source") or "self_hosted"
     default_country = (settings.get("collect_country") or "US").upper()
-    pages = db.list_tracked_pages()
-    proxies = db.list_enabled_proxies() if source == "self_hosted" else []
+    pages = db.list_tracked_pages() if platform == "meta" else []
+    proxies = (
+        db.list_enabled_proxies()
+        if source == "self_hosted" or platform == "tiktok"
+        else []
+    )
 
     if resume is None:
-        run_id = persist.start_collection_run(conn, trigger=trigger, pages_total=len(pages))
-        logger.info("run %s (%s): %d page(s), source=%s, default country=%s, proxies=%d",
-                    run_id, trigger, len(pages), source, default_country, len(proxies))
+        pages_total = 1 if platform == "tiktok" else len(pages)
+        run_id = persist.start_collection_run(conn, trigger=trigger, pages_total=pages_total)
+        logger.info(
+            "run %s (%s): platform=%s, %d page/search target(s), source=%s, "
+            "default country=%s, proxies=%d",
+            run_id, trigger, platform, pages_total, source, default_country,
+            len(proxies),
+        )
         run = _Run(conn, run_id, datetime.now(timezone.utc), RunProgress())
         plan = [(country, group, None) for country, group in make_batches(pages, default_country)]
         earlier = []
@@ -599,7 +731,11 @@ async def _collect_run(conn, *, make_collector=_default_make_collector, make_api
     # From here on nothing may raise: the run is open, and the caller needs its id
     # back to finish it.
     try:
-        if source == "apify":
+        if platform == "tiktok":
+            if resume is not None:
+                raise ValueError("TikTok 浏览器采集不支持断点恢复")
+            await _collect_tiktok(run, settings, make_tiktok, proxies)
+        elif source == "apify":
             if settings.get('collect_region'):
                 raise ValueError('区域采集请使用“开始采集”的公开浏览器通道；未启动付费 Apify 任务')
             await _collect_apify(run, plan, settings, make_apify, earlier)
@@ -622,7 +758,9 @@ async def _collect_run(conn, *, make_collector=_default_make_collector, make_api
 
 
 def run_collection(*, make_collector=_default_make_collector, make_apify=_default_make_apify,
-                   trigger: str = "manual", resume: int | None = None, settings_override=None) -> tuple[int, RunProgress]:
+                   make_tiktok=_default_make_tiktok, trigger: str = "manual",
+                   resume: int | None = None,
+                   settings_override=None) -> tuple[int, RunProgress]:
     """Collect every tracked Page (sync on the outside; async on the inside), or,
     with `resume`, carry on the run of that id through Apify that a stopped worker
     left open (see `_resume`).
@@ -634,6 +772,7 @@ def run_collection(*, make_collector=_default_make_collector, make_apify=_defaul
     try:
         return asyncio.run(
             _collect_run(conn, make_collector=make_collector, make_apify=make_apify,
+                         make_tiktok=make_tiktok,
                          trigger=trigger, resume=resume, settings_override=settings_override)
         )
     finally:

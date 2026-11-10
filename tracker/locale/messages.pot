@@ -1117,10 +1117,6 @@ msgstr ""
 msgid "First seen"
 msgstr ""
 
-#: tracker/web/templates/detail.html:126
-msgid "Last seen active"
-msgstr ""
-
 #: tracker/web/templates/detail.html:127
 msgid "Ad ID"
 msgstr ""

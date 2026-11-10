@@ -23,7 +23,7 @@ from ..auth import (
     verify_session_value,
 )
 from ..config import get_settings
-from ..media_urls import is_meta_media_url
+from ..media_urls import is_allowed_media_url
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -70,7 +70,7 @@ templates = Jinja2Templates(env=_env, context_processors=[_i18n_context])
 # missing. That URL comes from stored creative data, but the route accepts it as a
 # query param, so restrict it to Meta CDN hosts over https — otherwise an
 # authenticated user could turn the proxy into an SSRF against internal hosts.
-_allowed_media_fallback = is_meta_media_url
+_allowed_media_fallback = is_allowed_media_url
 
 
 def safe_href(url: str | None) -> str:

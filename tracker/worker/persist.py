@@ -29,7 +29,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .. import db, storage
-from ..media_urls import is_meta_media_url
+from ..media_urls import is_allowed_media_url
 from .normalize import NormalizedAd, NormalizedPage, media_id
 
 try:
@@ -216,7 +216,7 @@ def resume_collection_run(conn: psycopg.Connection, run_id: int, pages_total: in
 def pages_by_id(conn: psycopg.Connection, ids) -> list[dict]:
     """Pages as a collection reads them, by their ids."""
     return conn.execute(
-        """SELECT id, company_id, page_id, page_name, collect_country
+        """SELECT id, company_id, page_id, page_name, collect_country, platform
            FROM pages WHERE id = ANY(%s)""",
         (list(ids),),
     ).fetchall()
@@ -260,6 +260,9 @@ def upsert_ad(conn: psycopg.Connection, company_id: int, page_ref_id: int, run_i
     platforms = list(ad.publisher_platforms) if ad.publisher_platforms else None
     languages = list(ad.languages) if ad.languages else None
     categories = Jsonb(ad.categories) if ad.categories else None
+    coverage_data = Jsonb(ad.coverage_data) if ad.coverage_data is not None else None
+    coverage_countries = list(ad.coverage_countries)
+    external_ad_id = ad.external_ad_id or ad.id
     # Meta's grouping of ads that are versions of the same ad.
     collation_id = ad.collation_id or None
     collation_count = ad.collation_count
@@ -273,19 +276,28 @@ def upsert_ad(conn: psycopg.Connection, company_id: int, page_ref_id: int, run_i
         row = conn.execute(
             """INSERT INTO ads (
                    ad_archive_id, company_id, page_ref_id, page_id, page_name,
+                   platform, external_ad_id, advertiser_name, advertiser_id,
+                   registry_location, sponsor,
                    is_active, ad_status, delivery_start_time, delivery_stop_time, duration_days,
                    snapshot_url, ad_snapshot_url, publisher_platforms, languages, ad_type, categories,
                    collation_id, collation_count, display_format, body,
+                   coverage_data, coverage_countries, coverage_status, coverage_source,
+                   coverage_checked_at,
                    first_seen_at, last_seen_at, last_collection_run_id
-               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                         %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                RETURNING id""",
             (
                 ad.id, company_id, page_ref_id,
                 ad.page.id, ad.page.name,
+                ad.platform, external_ad_id, ad.advertiser_name, ad.advertiser_id,
+                ad.registry_location, ad.sponsor,
                 ad.is_active, ad.ad_status,
                 ad.delivery_start_time, ad.delivery_stop_time, duration,
                 ad.snapshot_url, ad.ad_snapshot_url, platforms, languages, ad.ad_type, categories,
                 collation_id, collation_count, ad.display_format, ad.body,
+                coverage_data, coverage_countries, ad.coverage_status or "not_checked",
+                ad.coverage_source, ad.coverage_checked_at,
                 now, now, run_id,
             ),
         ).fetchone()
@@ -296,6 +308,12 @@ def upsert_ad(conn: psycopg.Connection, company_id: int, page_ref_id: int, run_i
             """UPDATE ads SET
                    page_ref_id = COALESCE(%s, page_ref_id),
                    page_name = COALESCE(%s, page_name),
+                   platform = %s,
+                   external_ad_id = COALESCE(%s, external_ad_id),
+                   advertiser_name = COALESCE(%s, advertiser_name),
+                   advertiser_id = COALESCE(%s, advertiser_id),
+                   registry_location = COALESCE(%s, registry_location),
+                   sponsor = COALESCE(%s, sponsor),
                    is_active = %s, ad_status = %s,
                    delivery_start_time = COALESCE(%s, delivery_start_time),
                    delivery_stop_time = CASE WHEN %s THEN NULL
@@ -315,11 +333,31 @@ def upsert_ad(conn: psycopg.Connection, company_id: int, page_ref_id: int, run_i
                WHERE id = %s""",
             (
                 page_ref_id, ad.page.name,
+                ad.platform, external_ad_id, ad.advertiser_name, ad.advertiser_id,
+                ad.registry_location, ad.sponsor,
                 ad.is_active, ad.ad_status,
                 ad.delivery_start_time, bool(ad.is_active), ad.delivery_stop_time, duration,
                 ad.snapshot_url, ad.ad_snapshot_url, platforms, languages, ad.ad_type, categories,
                 collation_id, collation_count, ad.display_format, ad.body,
                 now, run_id, ad_db_id,
+            ),
+        )
+
+    if ad.coverage_checked_at is not None:
+        conn.execute(
+            """UPDATE ads SET
+                   coverage_data = %s,
+                   coverage_countries = %s,
+                   coverage_status = %s,
+                   coverage_source = %s,
+                   coverage_checked_at = %s,
+                   coverage_attempted_at = %s,
+                   coverage_error = NULL
+               WHERE id = %s""",
+            (
+                coverage_data, coverage_countries, ad.coverage_status or "available",
+                ad.coverage_source, ad.coverage_checked_at, ad.coverage_checked_at,
+                ad_db_id,
             ),
         )
 
@@ -526,7 +564,7 @@ def _get_meta_media(session, url: str):
     an Actor outside this instance), so one must not make the worker fetch this
     server's own network."""
     for _ in range(_MAX_REDIRECTS + 1):
-        if not is_meta_media_url(url):
+        if not is_allowed_media_url(url):
             raise MediaNotAllowed(url)
         resp = session.get(url, timeout=30, stream=True, allow_redirects=False)
         location = resp.headers.get("location")
@@ -640,7 +678,8 @@ def pending_media(conn: psycopg.Connection, video_quality: str = "standard",
         """SELECT cr.id, cr.card_key, a.ad_archive_id, cr.image_url, cr.video_url, cr.video_sd_url,
                   cr.thumbnail_url, cr.media_image_key, cr.media_video_key, cr.media_thumb_key
            FROM creatives cr JOIN ads a ON a.id = cr.ad_id
-           WHERE a.last_seen_at > now() - make_interval(days => %s)
+           WHERE a.platform = 'meta'
+             AND a.last_seen_at > now() - make_interval(days => %s)
              AND ((cr.image_url IS NOT NULL AND cr.media_image_key IS NULL)
                OR (cr.video_url IS NOT NULL AND cr.media_video_key IS NULL)
                OR (cr.thumbnail_url IS NOT NULL AND cr.media_thumb_key IS NULL))
@@ -660,7 +699,8 @@ def pending_media(conn: psycopg.Connection, video_quality: str = "standard",
                                  sd or r["video_url"], f"{prefix}_video", compress_video=not sd))
     for r in conn.execute(
         """SELECT id, page_id, profile_picture_url FROM pages
-           WHERE profile_picture_url IS NOT NULL AND profile_picture_key IS NULL"""
+           WHERE platform = 'meta'
+             AND profile_picture_url IS NOT NULL AND profile_picture_key IS NULL"""
     ).fetchall():
         name = media_id(r["profile_picture_url"]) or "picture"
         jobs.append(MediaJob("pages", r["id"], "profile_picture_key", r["profile_picture_url"],
@@ -734,8 +774,10 @@ def mirror_pending_media(conn: psycopg.Connection, *, make_session,
 
 def mirror_video_posters(conn: psycopg.Connection) -> int:
     """Recover missing posters from our archived videos, without relying on an expired CDN URL."""
-    rows = conn.execute('''SELECT id,media_video_key FROM creatives
-          WHERE media_thumb_key IS NULL AND media_video_key IS NOT NULL ORDER BY id LIMIT 100''').fetchall()
+    rows = conn.execute('''SELECT cr.id,cr.media_video_key FROM creatives cr
+          JOIN ads a ON a.id=cr.ad_id
+          WHERE a.platform='meta' AND cr.media_thumb_key IS NULL
+            AND cr.media_video_key IS NOT NULL ORDER BY cr.id LIMIT 100''').fetchall()
     saved = 0
     for row in rows:
         obj = None
@@ -784,6 +826,7 @@ def mark_disappeared_ads(conn: psycopg.Connection, page_ref_id: int, run_id: int
                    )) / 86400
                )::int)
            WHERE page_ref_id = %s
+             AND platform = 'meta'
              AND is_active = TRUE
              AND last_collection_run_id != %s
              AND delivery_start_time IS NOT NULL

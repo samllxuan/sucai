@@ -39,7 +39,9 @@ def get_ad_detail(ad_archive_id: str) -> dict | None:
                    cr.media_image_key, cr.media_video_key, cr.media_thumb_key,
                    cr.landing_page_id, lp.url_canonical AS lp_url,
                    drama.genres, drama.genres_source,
-                   a.ad_archive_id, a.is_active, a.duration_days,
+                   a.ad_archive_id, a.platform, a.external_ad_id,
+                   a.advertiser_name, a.advertiser_id, a.registry_location, a.sponsor,
+                   a.is_active, a.duration_days,
                    a.delivery_start_time, a.delivery_stop_time,
                    a.publisher_platforms, a.languages,
                    a.snapshot_url, a.ad_snapshot_url,
@@ -126,6 +128,12 @@ def get_ad_detail(ad_archive_id: str) -> dict | None:
     display_creatives = rows if is_carousel else rows[:1]
     return {
         "ad_archive_id": ad_archive_id,
+        "platform": first["platform"],
+        "external_ad_id": first["external_ad_id"],
+        "advertiser_name": first["advertiser_name"],
+        "advertiser_id": first["advertiser_id"],
+        "registry_location": first["registry_location"],
+        "sponsor": first["sponsor"],
         "public_metadata": metadata_for_ads([ad_archive_id]).get(ad_archive_id,{}),
         "company_id": first["company_id"],
         "company_name": first["company_name"],
@@ -152,7 +160,11 @@ def get_ad_detail(ad_archive_id: str) -> dict | None:
         "delivery_stop": _date_only(first["delivery_stop_time"]),
         "first_seen": _date_only(first["first_seen_at"]),
         "last_seen": _date_only(first["last_seen_at"]),
-        "snapshot_url": first["snapshot_url"] or first["ad_snapshot_url"],
+        "snapshot_url": (
+            first["snapshot_url"] or first["ad_snapshot_url"] or
+            (f"https://library.tiktok.com/ads/detail/?ad_id={first['external_ad_id']}"
+             if first["platform"] == "tiktok" and first["external_ad_id"] else None)
+        ),
         "creatives": display_creatives,
         "formats": [] if is_carousel else rows,
         "collation_id": first["collation_id"],

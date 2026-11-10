@@ -79,7 +79,7 @@ def db(_migrated_db):
     conn.execute(f"TRUNCATE {', '.join(_DATA_TABLES)} RESTART IDENTITY CASCADE")
     conn.execute(
         """UPDATE app_settings SET collect_interval_hours = 6, collect_country = 'BR', setup_completed = TRUE, language = NULL,
-               collect_now = FALSE, collect_now_requested_at = NULL,
+               collect_platform = 'meta', collect_now = FALSE, collect_now_requested_at = NULL,
                collect_source = 'self_hosted', apify_token = NULL, apify_max_parallel_runs = 2,
                video_quality = 'standard', image_quality = 'standard'
            WHERE id = 1"""

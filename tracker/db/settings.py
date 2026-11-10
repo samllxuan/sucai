@@ -32,7 +32,7 @@ def list_tracked_pages() -> list[dict]:
     with connect() as conn:
         return conn.execute(
             """SELECT id, company_id, page_id, page_name, collect_country
-               FROM pages WHERE is_tracked = TRUE ORDER BY id"""
+               FROM pages WHERE is_tracked = TRUE AND platform = 'meta' ORDER BY id"""
         ).fetchall()
 
 
