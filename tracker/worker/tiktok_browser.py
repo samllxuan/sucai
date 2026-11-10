@@ -586,4 +586,3 @@ class TikTokBrowser:
                     return selected, False
                 raise
         raise TikTokSearchError("TikTok 搜索分页超过安全上限，未视为完整结果")
-
