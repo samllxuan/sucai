@@ -1,34 +1,20 @@
 """Versioned partner API, independent of website login and collection settings."""
 import base64
 import binascii
-import hashlib
 import json
 import re
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ... import db, i18n
 from ...db.base import resolve_media_url
 from ...db.metadata import coverage_details
+from ..api_auth import authenticate
 
 router = APIRouter(prefix='/api/v1', tags=['partner'])
-
-
-def authenticate(authorization: str | None = Header(default=None)):
-    if not authorization or not authorization.startswith('Bearer '):
-        raise HTTPException(401, 'API key required', headers={'WWW-Authenticate':'Bearer'})
-    token = authorization[7:].strip()
-    if not token or len(token) > 256:
-        raise HTTPException(401, 'Invalid API key')
-    digest = hashlib.sha256(token.encode('utf-8')).hexdigest()
-    with db.connect() as c:
-        key = c.execute('SELECT key_hash FROM partner_api_keys WHERE key_hash=%s AND revoked_at IS NULL', (digest,)).fetchone()
-    if not key:
-        raise HTTPException(401, 'Invalid API key', headers={'WWW-Authenticate':'Bearer'})
-    return digest
 
 
 class SearchBody(BaseModel):

@@ -288,6 +288,17 @@ def _run_partner_job():
     return True
 
 
+def _run_drama_research_job():
+    from ..db import drama_research
+    from . import drama_research_worker
+
+    job = drama_research.claim()
+    if not job:
+        return False
+    drama_research_worker.run(job)
+    return True
+
+
 def _open_run(trigger: str) -> int | None:
     """A run for a collection that failed before it opened one, so the failure
     shows in Settings instead of the request just vanishing."""
@@ -395,8 +406,9 @@ def main() -> None:
     logger.info("scheduler started (poll every %ds)", POLL_SECONDS)
     # a resumed run stands for the startup run: collecting again would pay twice
     resume = _take_the_lock(lock)
-    from ..db import partner_jobs
+    from ..db import drama_research, partner_jobs
     partner_jobs.recover_interrupted()
+    drama_research.recover_interrupted()
     # A click queued while the worker was restarting is this first run, not a
     # second identical collection five seconds after the startup run finishes.
     trigger = "manual" if resume is None and db.consume_collect_now() else "startup"
@@ -422,6 +434,8 @@ def main() -> None:
                     logger.info("interval elapsed: starting a scheduled run")
                 _run_once("manual" if collect_now else "schedule")
                 last_run = time.time()
+            elif _run_drama_research_job():
+                pass
             elif _run_partner_job():
                 last_run = time.time()
         except Exception as exc:  # a database hiccup must not stop the worker

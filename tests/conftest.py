@@ -41,6 +41,8 @@ _DATA_TABLES = (
     "companies", "pages", "collection_runs", "ads", "landing_pages", "creatives",
     "ad_appearances", "collections", "collection_items",
     "page_snapshots", "users", "proxies", "apify_actor_runs",
+    "drama_research_jobs", "drama_research_videos", "drama_research_subjects",
+    "partner_search_jobs", "partner_api_keys",
 )
 
 

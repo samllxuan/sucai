@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ... import db
 from ...db.collected_apps import list_collected_apps
+from ...db import drama_research as drama_research_db
 from ...i18n import N_, translate
 from ..deps import _authed, _needs_setup, _setup_pending, _tier, request_lang, templates
 
@@ -92,8 +93,13 @@ def library_api(request: Request):
 
 @router.get("/api/ads/summary")
 def library_summary_api(request: Request):
-    """Public aggregate statistics for the same filters as the library."""
-    return JSONResponse(jsonable_encoder(db.get_library_summary(library_filters(request))),
+    """Public ad aggregates plus any accumulated drama research for the query."""
+    filters = library_filters(request)
+    payload = db.get_library_summary(filters)
+    drama = drama_research_db.get_summary(filters.q)
+    if drama is not None:
+        payload["drama_research"] = drama
+    return JSONResponse(jsonable_encoder(payload),
                         headers={"cache-control": "no-store"})
 
 
