@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import uuid
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -22,6 +22,17 @@ from tracker.worker.drama_parsers import (
     youtube_video_ids,
 )
 from tracker.web.routes import drama_research_api
+
+
+@pytest.fixture(autouse=True)
+def _fresh_research_throttle(monkeypatch):
+    from tracker.web.throttle import RequestThrottle
+
+    monkeypatch.setattr(
+        drama_research_api,
+        "research_create_throttle",
+        RequestThrottle(max_requests=100, window=60),
+    )
 
 
 def _script(value: dict) -> str:
@@ -203,7 +214,6 @@ def test_collector_distinguishes_known_empty_from_failure():
 def test_api_validates_aliases_and_returns_polling_contract():
     app = FastAPI()
     app.include_router(drama_research_api.router)
-    app.dependency_overrides[drama_research_api.authenticate] = lambda: "key-hash"
     client = TestClient(app)
 
     class Result:
@@ -257,33 +267,28 @@ def test_api_validates_aliases_and_returns_polling_contract():
 
 
 def test_api_persists_and_reuses_an_active_job(db):
-    token = "drama-research-test-key"
-    key_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    db.execute(
-        "INSERT INTO partner_api_keys(key_hash,label) VALUES(%s,%s)",
-        (key_hash, "drama research test"),
-    )
-    db.commit()
-
     from tracker.web.app import app as web_app
 
     client = TestClient(web_app)
-    headers = {"Authorization": f"Bearer {token}"}
     body = {
         "title": "Example Drama",
         "aliases": ["Other Name", "example drama", "Other Name"],
         "region": "us",
     }
 
-    first = client.post("/api/v1/drama-research", json=body, headers=headers)
-    second = client.post("/api/v1/drama-research", json=body, headers=headers)
+    first = client.post("/api/v1/drama-research", json=body)
+    second = client.post("/api/v1/drama-research", json=body)
     assert first.status_code == 202
     assert second.status_code == 202
     assert first.json()["job_id"] == second.json()["job_id"]
+    anonymous_job = db.execute(
+        "SELECT key_hash FROM drama_research_jobs WHERE id=%s",
+        (first.json()["job_id"],),
+    ).fetchone()
+    assert anonymous_job["key_hash"] is None
 
     status = client.get(
         f"/api/v1/drama-research/{first.json()['job_id']}",
-        headers=headers,
     )
     assert status.status_code == 200
     payload = status.json()
@@ -311,7 +316,7 @@ def test_api_persists_and_reuses_an_active_job(db):
         (job_id,),
     )
     db.commit()
-    running_reuse = client.post("/api/v1/drama-research", json=body, headers=headers)
+    running_reuse = client.post("/api/v1/drama-research", json=body)
     assert running_reuse.status_code == 202
     assert running_reuse.json()["job_id"] == job_id
     assert running_reuse.json()["status"] == "running"
@@ -383,7 +388,7 @@ def test_api_persists_and_reuses_an_active_job(db):
     assert "sources" not in drama
     assert "creators" not in drama
 
-    requeued = client.post("/api/v1/drama-research", json=body, headers=headers)
+    requeued = client.post("/api/v1/drama-research", json=body)
     assert requeued.status_code == 202
     assert requeued.json()["job_id"] != job_id
     queued_again = client.get(
@@ -440,24 +445,40 @@ def test_api_persists_and_reuses_an_active_job(db):
     assert monotonic["summary"]["combined"]["shares"] == 5
     assert monotonic["collection"]["warnings"] == ["later sample was smaller"]
 
-    detail = client.get(f"/api/v1/drama-research/{job_id}", headers=headers)
+    detail = client.get(f"/api/v1/drama-research/{job_id}")
     assert detail.status_code == 200
     assert len(detail.json()["sources"]) == 1
 
 
-def test_summary_aggregates_all_regions_without_counting_a_video_twice(db):
-    token = "drama-research-multi-region-key"
-    key_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    db.execute(
-        "INSERT INTO partner_api_keys(key_hash,label) VALUES(%s,%s)",
-        (key_hash, "drama research multi-region test"),
-    )
-    db.commit()
+def test_public_research_create_is_rate_limited(db, monkeypatch):
+    from tracker.web.app import app as web_app
+    from tracker.web.throttle import RequestThrottle
 
+    monkeypatch.setattr(
+        drama_research_api,
+        "research_create_throttle",
+        RequestThrottle(max_requests=2, window=60),
+    )
+    client = TestClient(web_app)
+    for title in ("Rate Limit Drama One", "Rate Limit Drama Two"):
+        response = client.post(
+            "/api/v1/drama-research",
+            json={"title": title, "aliases": [], "region": "US"},
+        )
+        assert response.status_code == 202
+
+    limited = client.post(
+        "/api/v1/drama-research",
+        json={"title": "Rate Limit Drama Three", "aliases": [], "region": "US"},
+    )
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) > 0
+
+
+def test_summary_aggregates_all_regions_without_counting_a_video_twice(db):
     from tracker.web.app import app as web_app
 
     client = TestClient(web_app)
-    headers = {"Authorization": f"Bearer {token}"}
     jobs = {}
     for region in ("US", "GB"):
         response = client.post(
@@ -467,7 +488,6 @@ def test_summary_aggregates_all_regions_without_counting_a_video_twice(db):
                 "aliases": ["Other Name"],
                 "region": region,
             },
-            headers=headers,
         )
         assert response.status_code == 202
         jobs[region] = uuid.UUID(response.json()["job_id"])

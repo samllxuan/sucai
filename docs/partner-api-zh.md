@@ -1,6 +1,6 @@
 # L2 合作平台 API（v1）
 
-地址：`https://l2.divinlove.com`。请求和响应均为 UTF-8 JSON。除公开的 `GET /api/ads/summary` 外，接口必须通过请求头 `Authorization: Bearer <API密钥>` 认证；密钥由 L2 管理者另行提供，请勿提交到 Git、写进网址或前端代码。网页免登录不等于接口免密钥。
+地址：`https://l2.divinlove.com`。请求和响应均为 UTF-8 JSON。短剧调研的创建、任务详情和 `GET /api/ads/summary` 均为公开接口，无需 API Key；其他接口必须通过请求头 `Authorization: Bearer <API密钥>` 认证。密钥由 L2 管理者另行提供，请勿提交到 Git、写进网址或前端代码。
 
 例如，密钥已安全存入服务端环境变量 `L2_PARTNER_KEY` 时：
 
@@ -40,7 +40,7 @@ curl -X POST "https://l2.divinlove.com/api/v1/searches" \
 }
 ```
 
-`title` 必填；`aliases` 可为空，最多 10 个；`region` 是两位国家代码。API 返回 `202`、`job_id` 和 `status_url`，排队或运行中的相同密钥、剧名、别名集合和地区会复用同一任务。任务最多同时排队或运行 20 个，队列满时返回 `429`。
+`title` 必填；`aliases` 可为空，最多 10 个；`region` 是两位国家代码。无需登录或 API Key。API 返回 `202`、`job_id` 和 `status_url`，排队或运行中的相同剧名、别名集合和地区会复用同一任务。任务最多同时排队或运行 20 个，队列满时返回 `429`；同一客户端地址每分钟最多提交 5 次，超过限制时返回 `429` 和 `Retry-After`。
 
 `status_url` 直接指向 `GET /api/ads/summary?status=all&q=<剧名>`，调用方每 10–30 秒轮询这里即可，不要再拼 `job_id`。采集完成后逐视频数据会直接落入数据库；summary 按剧名或别名找到同一剧目，并汇总所有国家已落库的视频。不需要也不使用 `drama_region`，同一个剧名无论从哪个国家任务采集，都会进入同一份汇总。没有匹配的短剧数据时仍返回原广告库 summary；存在短剧数据时额外返回 `drama_research`。
 
@@ -66,7 +66,7 @@ curl -X POST "https://l2.divinlove.com/api/v1/searches" \
 
 任务状态为 `queued`、`running`、`completed`、`partial`、`no_results` 或 `failed`；`phase` 依次可能为 `tiktok_discovery`、`tiktok_videos`、`google_discovery`、`youtube_videos`、`summarizing`。`partial` 表示至少拿到一部分视频，但某次搜索、视频详情或样本上限使结果不完整；`no_results` 只用于搜索页明确表示无结果；访问被限制或页面结构变化属于失败，不会伪报为零。
 
-需要逐条排查视频来源时，可另外用鉴权接口 `GET /api/v1/drama-research/{job_id}` 查询完整详情；日常任务轮询只使用 summary。
+需要逐条排查视频来源时，可另外用公开接口 `GET /api/v1/drama-research/{job_id}` 查询完整详情；日常任务轮询只使用 summary。
 
 采集逻辑：
 

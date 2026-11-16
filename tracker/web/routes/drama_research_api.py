@@ -1,4 +1,4 @@
-"""Async partner API for TikTok and Google/YouTube drama research."""
+"""Public async API for TikTok and Google/YouTube drama research."""
 
 from __future__ import annotations
 
@@ -6,17 +6,18 @@ import re
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
 
 from ... import db
 from ...db import drama_research as drama_research_db
-from ..api_auth import authenticate
+from ..throttle import RequestThrottle
 
 router = APIRouter(prefix="/api/v1", tags=["drama-research"])
 
 MAX_ACTIVE_JOBS = 20
+research_create_throttle = RequestThrottle(max_requests=5, window=60)
 
 _JOB_COLUMNS = """id,title,aliases,region,status,phase,result,error,
                   created_at,started_at,finished_at"""
@@ -56,10 +57,16 @@ def _clean_request(body: ResearchBody) -> tuple[str, list[str], str]:
 
 
 @router.post("/drama-research", status_code=202)
-def create_research(
-    body: ResearchBody, request: Request, key: str = Depends(authenticate)
-):
+def create_research(body: ResearchBody, request: Request):
     title, aliases, region = _clean_request(body)
+    address = request.client.host if request.client else ""
+    if wait := research_create_throttle.retry_after(address):
+        raise HTTPException(
+            429,
+            "Too many research requests; retry later",
+            headers={"Retry-After": str(wait)},
+        )
+
     aliases_json = Jsonb(aliases)
 
     with db.connect() as conn:
@@ -69,11 +76,11 @@ def create_research(
         )
         previous = conn.execute(
             """SELECT id,status,phase FROM drama_research_jobs
-                WHERE key_hash=%s AND lower(title)=lower(%s)
+                WHERE lower(title)=lower(%s)
                   AND aliases=%s AND region=%s
                   AND status IN ('queued','running')
                 ORDER BY created_at DESC LIMIT 1""",
-            (key, title, aliases_json, region),
+            (title, aliases_json, region),
         ).fetchone()
         if previous:
             job_id = previous["id"]
@@ -88,9 +95,9 @@ def create_research(
             job_id = uuid.uuid4()
             conn.execute(
                 """INSERT INTO drama_research_jobs
-                   (id,key_hash,title,aliases,region,status,subject_id)
-                   VALUES(%s,%s,%s,%s,%s,'queued',%s)""",
-                (job_id, key, title, aliases_json, region, subject_id),
+                   (id,title,aliases,region,status,subject_id)
+                   VALUES(%s,%s,%s,%s,'queued',%s)""",
+                (job_id, title, aliases_json, region, subject_id),
             )
             job_status = "queued"
         drama_research_db.sync_active_state(conn, subject_id)
@@ -106,14 +113,14 @@ def create_research(
     }
 
 
-def get_job(job_id: uuid.UUID, key: str) -> dict | None:
-    """Load one job inside the caller's API-key boundary."""
+def get_job(job_id: uuid.UUID) -> dict | None:
+    """Load one public job by its unguessable identifier."""
     with db.connect() as conn:
         return conn.execute(
             f"""SELECT {_JOB_COLUMNS}
                   FROM drama_research_jobs
-                 WHERE id=%s AND key_hash=%s""",
-            (job_id, key),
+                 WHERE id=%s""",
+            (job_id,),
         ).fetchone()
 
 
@@ -145,8 +152,8 @@ def full_payload(row: dict) -> dict:
 
 
 @router.get("/drama-research/{job_id}")
-def research_status(job_id: uuid.UUID, key: str = Depends(authenticate)):
-    row = get_job(job_id, key)
+def research_status(job_id: uuid.UUID):
+    row = get_job(job_id)
     if not row:
         raise HTTPException(404, "Research job not found")
     return full_payload(row)

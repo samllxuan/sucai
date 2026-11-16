@@ -55,5 +55,38 @@ class LoginThrottle:
             self._failures.pop(address, None)
 
 
+class RequestThrottle:
+    """Allow a fixed number of requests per address in a sliding window."""
+
+    def __init__(self, max_requests: int = 5, window: float = 60,
+                 clock=time.monotonic):
+        self.max_requests = max_requests
+        self.window = window
+        self._clock = clock
+        self._requests: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def retry_after(self, address: str) -> int:
+        """Record one request, or return seconds until this address may retry."""
+        with self._lock:
+            now = self._clock()
+            for key, times in list(self._requests.items()):
+                recent = [t for t in times if now - t < self.window]
+                if recent:
+                    self._requests[key] = recent
+                else:
+                    del self._requests[key]
+            recent = self._requests.get(address, [])
+            if len(recent) >= self.max_requests:
+                return max(1, math.ceil(recent[0] + self.window - now))
+            recent.append(now)
+            self._requests[address] = recent
+            return 0
+
+    def reset(self, address: str) -> None:
+        with self._lock:
+            self._requests.pop(address, None)
+
+
 login_throttle = LoginThrottle()                                     # per client address
 account_throttle = LoginThrottle(max_failures=ACCOUNT_MAX_FAILURES)  # per user id

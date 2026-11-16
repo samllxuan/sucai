@@ -79,6 +79,20 @@ def test_login_throttle_blocks_then_releases():
     assert t.retry_after("9.9.9.9") == 0
 
 
+def test_request_throttle_blocks_then_releases():
+    from tracker.web.throttle import RequestThrottle
+
+    now = [1000.0]
+    t = RequestThrottle(max_requests=2, window=60, clock=lambda: now[0])
+    assert t.retry_after("1.2.3.4") == 0
+    assert t.retry_after("1.2.3.4") == 0
+    assert t.retry_after("1.2.3.4") == 60
+    assert t.retry_after("5.6.7.8") == 0
+    now[0] += 60
+    assert t.retry_after("1.2.3.4") == 0
+    assert "5.6.7.8" not in t._requests
+
+
 # ── carousel heuristic ──────────────────────────────────────────────────────
 
 def _cr(title="", body="", link="", cta=""):
