@@ -273,6 +273,20 @@ def tiktok_page_is_blocked(html: str, final_url: str = "") -> bool:
     )
 
 
+def tiktok_page_has_server_error(html: str) -> bool:
+    text = re.sub(
+        r"<(script|style)\b[^>]*>.*?</\1\s*>",
+        " ",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = unescape(re.sub(r"<[^>]+>", " ", text)).casefold()
+    return (
+        "something went wrong" in text
+        or "something wrong with the server" in text
+    )
+
+
 def parse_tiktok_video(html: str, video_id: str | None = None) -> VideoRecord | None:
     for value in _json_values(html):
         for node in walk_json(value):

@@ -17,6 +17,7 @@ from tracker.worker.drama_parsers import (
     parse_tiktok_video,
     parse_youtube_comment_count,
     parse_youtube_video,
+    tiktok_page_has_server_error,
     tiktok_video_links,
     youtube_comment_continuation,
     youtube_video_ids,
@@ -105,6 +106,11 @@ def test_tiktok_and_google_search_parsers_extract_video_ids():
     """
     assert youtube_video_ids(google_html) == ["abcdefghijk", "lmnopqrstuv"]
     assert google_page_is_explicitly_empty("Your search did not match any documents.")
+    assert tiktok_page_has_server_error("Something went wrong. Try again.")
+    assert not tiktok_page_has_server_error(
+        '<script>{"error":"Something went wrong"}</script><main>Videos</main>'
+    )
+    assert not tiktok_page_has_server_error("No results found")
 
 
 def test_video_pages_yield_all_public_counters_that_are_exposed():
@@ -144,6 +150,10 @@ def test_video_pages_yield_all_public_counters_that_are_exposed():
 class _FakeReader:
     def __init__(self):
         self.urls: list[str] = []
+        self.tiktok_prepared = False
+
+    async def prepare_tiktok(self):
+        self.tiktok_prepared = True
 
     async def fetch(self, url: str, **_kwargs):
         self.urls.append(url)
@@ -167,14 +177,16 @@ class _FakeReader:
 
 
 def test_collector_returns_aggregates_and_traceable_sources():
+    reader = _FakeReader()
     result = asyncio.run(
         drama_collector.collect_research(
             "I Got Three Girlfriends From the System",
             [],
             "US",
-            reader=_FakeReader(),
+            reader=reader,
         )
     )
+    assert reader.tiktok_prepared is True
     assert result["status"] == "completed"
     assert result["summary"]["tiktok"]["video_count"] == 1
     assert result["summary"]["tiktok"]["views"] == 123456
@@ -209,6 +221,46 @@ def test_collector_distinguishes_known_empty_from_failure():
     assert result["status"] == "no_results"
     assert result["summary"]["combined"]["video_count"] == 0
     assert result["sources"] == []
+
+
+class _TikTokSearchErrorReader:
+    async def fetch(self, url: str, **_kwargs):
+        if url.startswith("https://www.tiktok.com/search"):
+            html = "Something went wrong with the server"
+        elif url.startswith("https://www.tiktok.com/discover"):
+            html = (
+                '<a href="https://www.tiktok.com/@drama/video/'
+                '7200000000000000001">result</a>'
+            )
+        elif url == "https://www.tiktok.com/@drama/video/7200000000000000001":
+            html = _tiktok_detail()
+        elif url.startswith("https://www.google.com/search"):
+            html = "Your search did not match any documents."
+        else:
+            raise AssertionError(url)
+        return drama_collector.PageSnapshot(html=html, final_url=url, status=200)
+
+    async def youtube_comment_count(self, _html: str, _region: str):
+        return None
+
+
+def test_tiktok_search_error_falls_back_to_discover():
+    result = asyncio.run(
+        drama_collector.collect_research(
+            "I Got Three Girlfriends From the System",
+            [],
+            "US",
+            reader=_TikTokSearchErrorReader(),
+        )
+    )
+    assert result["status"] == "partial"
+    assert result["summary"]["tiktok"]["status"] == "complete"
+    assert result["summary"]["tiktok"]["video_count"] == 1
+    assert result["summary"]["tiktok"]["views"] == 123456
+    assert any(
+        search["platform"] == "tiktok" and search["status"] == "ok"
+        for search in result["collection"]["searches"]
+    )
 
 
 def test_api_validates_aliases_and_returns_polling_contract():
@@ -473,6 +525,110 @@ def test_public_research_create_is_rate_limited(db, monkeypatch):
     )
     assert limited.status_code == 429
     assert int(limited.headers["retry-after"]) > 0
+
+
+def test_failed_platform_keeps_existing_summary_data(db):
+    from tracker.web.app import app as web_app
+
+    client = TestClient(web_app)
+    body = {
+        "title": "Persistent Drama",
+        "aliases": ["Persistent Alias"],
+        "region": "US",
+    }
+    created = client.post("/api/v1/drama-research", json=body)
+    assert created.status_code == 202
+    job_id = uuid.UUID(created.json()["job_id"])
+    db.execute(
+        """UPDATE drama_research_jobs
+              SET status='running',phase='summarizing',started_at=now()
+            WHERE id=%s""",
+        (job_id,),
+    )
+    db.commit()
+    drama_research_db.finish(
+        job_id,
+        {
+            "status": "partial",
+            "summary": {
+                "tiktok": {"status": "partial"},
+                "google": {"status": "failed"},
+            },
+            "sources": [
+                {
+                    "platform": "tiktok",
+                    "content_platform": "tiktok",
+                    "video_id": "7200000000000000009",
+                    "url": "https://www.tiktok.com/video/7200000000000000009",
+                    "title": "Episode 9",
+                    "creator": "persistent-account",
+                    "published_at": "2026-11-04T00:00:00+00:00",
+                    "views": 9000,
+                    "likes": 900,
+                    "comments": 90,
+                    "shares": 9,
+                    "matched_aliases": ["Persistent Drama"],
+                }
+            ],
+            "collection": {
+                "region": "US",
+                "captured_at": "2026-11-16T00:00:00+00:00",
+                "warnings": ["Google blocked"],
+                "limits": {"max_videos_per_platform": 40},
+            },
+        },
+    )
+
+    first = client.get(
+        "/api/ads/summary",
+        params={"status": "all", "q": "Persistent Drama"},
+    ).json()["drama_research"]
+    assert first["status"] == "partial"
+    assert first["summary"]["tiktok"]["status"] == "partial"
+    assert first["summary"]["google"]["status"] == "failed"
+    assert first["summary"]["combined"]["views"] == 9000
+
+    requeued = client.post("/api/v1/drama-research", json=body)
+    assert requeued.status_code == 202
+    failed_job_id = uuid.UUID(requeued.json()["job_id"])
+    db.execute(
+        """UPDATE drama_research_jobs
+              SET status='running',phase='summarizing',started_at=now()
+            WHERE id=%s""",
+        (failed_job_id,),
+    )
+    db.commit()
+    drama_research_db.finish(
+        failed_job_id,
+        {
+            "status": "failed",
+            "summary": {
+                "tiktok": {"status": "failed"},
+                "google": {"status": "failed"},
+            },
+            "sources": [],
+            "collection": {
+                "region": "US",
+                "captured_at": "2026-11-17T00:00:00+00:00",
+                "warnings": ["both platforms blocked"],
+                "limits": {"max_videos_per_platform": 40},
+            },
+        },
+    )
+
+    second = client.get(
+        "/api/ads/summary",
+        params={"status": "all", "q": "Persistent Drama"},
+    ).json()["drama_research"]
+    assert second["status"] == "partial"
+    assert second["summary"]["combined"]["views"] == 9000
+    assert second["summary"]["tiktok"]["video_count"] == 1
+    assert second["summary"]["tiktok"]["status"] == "partial"
+    assert second["summary"]["google"]["status"] == "failed"
+    assert second["collection"]["warnings"] == [
+        "Google blocked",
+        "both platforms blocked",
+    ]
 
 
 def test_summary_aggregates_all_regions_without_counting_a_video_twice(db):

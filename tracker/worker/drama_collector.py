@@ -29,6 +29,7 @@ from .drama_parsers import (
     tiktok_discover_url,
     tiktok_page_is_blocked,
     tiktok_page_is_explicitly_empty,
+    tiktok_page_has_server_error,
     tiktok_search_url,
     tiktok_video_links,
     youtube_comment_continuation,
@@ -155,13 +156,6 @@ class BrowserPageReader:
             viewport={"width": 1440, "height": 900},
         )
 
-        async def skip_heavy_asset(route) -> None:
-            if route.request.resource_type in {"image", "media", "font"}:
-                await route.abort()
-            else:
-                await route.continue_()
-
-        await self.context.route("**/*", skip_heavy_asset)
         self.page = await self.context.new_page()
         self.page.set_default_timeout(30_000)
 
@@ -173,6 +167,13 @@ class BrowserPageReader:
             if self.runtime:
                 await self.runtime.stop()
             self.page = self.context = self.browser = self.runtime = None
+
+    async def prepare_tiktok(self) -> None:
+        """Establish TikTok's anonymous browser session before the first search."""
+        await self.fetch(
+            "https://www.tiktok.com/",
+            settle_ms=5_000,
+        )
 
     @staticmethod
     def _retry_after(response) -> float | None:
@@ -464,6 +465,12 @@ async def collect_research(
         # TikTok search, with Discover as a fallback for aliases whose search page
         # contains no video cards. This stays read-only and anonymous.
         _phase(on_phase, "tiktok_discovery")
+        prepare_tiktok = getattr(page_reader, "prepare_tiktok", None)
+        if prepare_tiktok:
+            try:
+                await prepare_tiktok()
+            except PageFetchError:
+                _warning(warnings, "TikTok 匿名会话预热失败")
         tiktok_candidates: dict[str, Candidate] = {}
         for alias in aliases:
             if elapsed_expired():
@@ -498,7 +505,12 @@ async def collect_research(
                     }
                 )
                 continue
-            links = tiktok_video_links(snapshot.html)
+            search_failed = tiktok_page_has_server_error(snapshot.html)
+            if search_failed:
+                _warning(warnings, "TikTok 搜索接口返回错误，已改用话题页")
+                links: dict[str, str] = {}
+            else:
+                links = tiktok_video_links(snapshot.html)
             source_url = query_url
             status = "ok"
             if not links:
@@ -512,9 +524,18 @@ async def collect_research(
                     links = tiktok_video_links(discover.html)
                     source_url = discover_url
                     status = "ok" if links else status
+                    if not links and tiktok_page_has_server_error(discover.html):
+                        outcomes["tiktok"]["errors"] += 1
+                        _warning(warnings, "TikTok 话题页返回服务错误页")
+                        status = "failed"
+                    elif not links and search_failed:
+                        outcomes["tiktok"]["errors"] += 1
+                        _warning(warnings, "TikTok 搜索和话题页均未返回可解析视频")
+                        status = "failed"
                 except PageFetchError:
                     outcomes["tiktok"]["errors"] += 1
                     _warning(warnings, "TikTok 部分话题页读取失败")
+                    status = "failed"
             if links:
                 for video_id, video_url in links.items():
                     _add_candidate(
@@ -527,7 +548,7 @@ async def collect_research(
             elif tiktok_page_is_explicitly_empty(snapshot.html):
                 outcomes["tiktok"]["empty"] += 1
                 status = "empty"
-            else:
+            elif status != "failed":
                 outcomes["tiktok"]["errors"] += 1
                 status = "failed"
                 _warning(warnings, "TikTok 搜索页无可解析视频，且不能确认是空结果")

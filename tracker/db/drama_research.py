@@ -166,7 +166,7 @@ def _upsert_video(conn, subject_id, source: dict) -> None:
 
 def finish(job_id, result: dict) -> None:
     status = result.get("status")
-    if status not in {"completed", "partial", "no_results"}:
+    if status not in {"completed", "partial", "no_results", "failed"}:
         raise ValueError(f"invalid completed research status: {status}")
     with connect() as conn:
         job = conn.execute(
@@ -181,10 +181,30 @@ def finish(job_id, result: dict) -> None:
         for source in result.get("sources") or []:
             _upsert_video(conn, job["subject_id"], source)
         collection = result.get("collection") or {}
+        previous_subject = conn.execute(
+            """SELECT collection FROM drama_research_subjects WHERE id=%s""",
+            (job["subject_id"],),
+        ).fetchone()
+        previous_collection = (
+            (previous_subject or {}).get("collection") or {}
+        )
         compact_collection = {
             key: collection.get(key)
             for key in ("region", "captured_at", "warnings", "limits")
         }
+        compact_collection["warnings"] = list(
+            dict.fromkeys(
+                (previous_collection.get("warnings") or [])
+                + (collection.get("warnings") or [])
+            )
+        )
+        platform_statuses = {
+            platform: summary.get("status")
+            for platform, summary in (result.get("summary") or {}).items()
+            if platform in {"tiktok", "google"} and summary.get("status")
+        }
+        if platform_statuses:
+            compact_collection["platform_statuses"] = platform_statuses
         conn.execute(
             """UPDATE drama_research_subjects
                   SET status=%s, phase='finished', collection=%s, updated_at=now()
@@ -319,11 +339,24 @@ def _merge_collections(subjects) -> dict:
     )
     warnings: list = []
     limits: dict = {}
+    latest_platform_states: dict[str, tuple[str, str]] = {}
     for row in subjects:
         collection = row["collection"] or {}
         for warning in collection.get("warnings") or []:
             if warning not in warnings:
                 warnings.append(warning)
+        row_captured_at = collection.get("captured_at")
+        for platform, platform_status in (
+            collection.get("platform_statuses") or {}
+        ).items():
+            if platform not in {"tiktok", "google"} or not platform_status:
+                continue
+            current = latest_platform_states.get(platform)
+            if current is None or (row_captured_at or "") >= current[0]:
+                latest_platform_states[platform] = (
+                    row_captured_at or "",
+                    platform_status,
+                )
         for key, value in (collection.get("limits") or {}).items():
             if isinstance(value, bool):
                 limits[key] = bool(limits.get(key, True) and value)
@@ -337,6 +370,10 @@ def _merge_collections(subjects) -> dict:
         "captured_at": captured_at,
         "warnings": warnings,
         "limits": limits,
+        "platform_statuses": {
+            platform: state[1]
+            for platform, state in latest_platform_states.items()
+        },
     }
 
 
@@ -411,13 +448,23 @@ def get_summary(query: str) -> dict | None:
     google = [row for row in sources if row["platform"] == "google"]
     tiktok_summary = _summary_for(tiktok)
     google_summary = _summary_for(google)
-    tiktok_summary["status"] = "complete"
-    google_summary["status"] = "complete"
+    collection = _merge_collections(subjects)
+    platform_statuses = collection.get("platform_statuses") or {}
+    tiktok_summary["status"] = _resolved_platform_status(
+        platform_statuses.get("tiktok"),
+        bool(tiktok),
+    )
+    google_summary["status"] = _resolved_platform_status(
+        platform_statuses.get("google"),
+        bool(google),
+    )
     google_summary["content_platform"] = "youtube"
     google_summary["discovery"] = "google_short_videos"
     combined = _summary_for(sources)
     combined["platforms"] = sorted({row["platform"] for row in sources})
     status, phase = _combined_state(subjects)
+    if sources and status == "failed":
+        status, phase = "partial", "finished"
     return {
         "status": status,
         "phase": phase,
@@ -426,6 +473,18 @@ def get_summary(query: str) -> dict | None:
             "google": google_summary,
             "combined": combined,
         },
-        "collection": _merge_collections(subjects),
+        "collection": collection,
         "updated_at": max(row["updated_at"] for row in subjects),
     }
+
+
+def _resolved_platform_status(stored: str | None, has_sources: bool) -> str:
+    if has_sources:
+        if stored in {"complete", "empty"}:
+            return "complete"
+        if stored == "partial":
+            return "partial"
+        return "partial" if stored else "complete"
+    if stored:
+        return stored
+    return "empty"
