@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 MAX_RESULTS_PER_PLATFORM = 40
 RESEARCH_TIME_BUDGET_SECONDS = 10 * 60
+SCROLL_SETTLE_MS = 3_000
+TIKTOK_SEARCH_SETTLE_MS = 5_000
 TIKTOK_DISCOVER_SETTLE_MS = 10_000
 TIKTOK_VIDEO_SETTLE_MS = 5_000
 MIN_REQUEST_INTERVAL_SECONDS = {
@@ -229,7 +231,7 @@ class BrowserPageReader:
                     await self.page.evaluate(
                         "window.scrollTo(0, document.body.scrollHeight)"
                     )
-                    await self.page.wait_for_timeout(550)
+                    await self.page.wait_for_timeout(SCROLL_SETTLE_MS)
                 return PageSnapshot(
                     html=await self.page.content(),
                     final_url=self.page.url,
@@ -487,7 +489,11 @@ async def collect_research(
                 break
             query_url = tiktok_search_url(alias, region)
             try:
-                snapshot = await page_reader.fetch(query_url, settle_ms=1_000, scrolls=2)
+                snapshot = await page_reader.fetch(
+                    query_url,
+                    settle_ms=TIKTOK_SEARCH_SETTLE_MS,
+                    scrolls=2,
+                )
             except PageFetchError:
                 outcomes["tiktok"]["errors"] += 1
                 _warning(warnings, "TikTok 部分搜索页读取失败")

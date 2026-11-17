@@ -211,12 +211,12 @@ def youtube_video_ids(html: str) -> list[str]:
 def youtube_search_url(query: str, region: str) -> str:
     return (
         "https://www.youtube.com/results?search_query="
-        f"{quote('\"' + query + '\"')}&sp=EgIYAQ%253D%253D&hl=en&gl={region}"
+        f"{quote('\"' + query + '\"')}&hl=en"
     )
 
 
 def tiktok_search_url(query: str, region: str) -> str:
-    return f"https://www.tiktok.com/search?q={quote(query)}&region={region}"
+    return f"https://www.tiktok.com/search?q={quote(query)}"
 
 
 def tiktok_discover_url(query: str) -> str:

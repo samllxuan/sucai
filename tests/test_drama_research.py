@@ -159,7 +159,7 @@ def test_tiktok_and_youtube_search_parsers_extract_video_ids():
         youtube_search_url("Three Girlfriends From the System", "US")
         == "https://www.youtube.com/results?search_query="
         "%22Three%20Girlfriends%20From%20the%20System%22"
-        "&sp=EgIYAQ%253D%253D&hl=en&gl=US"
+        "&hl=en"
     )
     assert matches_aliases(
         ["Three Girlfriends From the System #3"],
@@ -417,6 +417,11 @@ def test_tiktok_search_error_falls_back_to_discover():
         search["platform"] == "tiktok" and search["status"] == "ok"
         for search in result["collection"]["searches"]
     )
+    search_call = next(
+        call for call in reader.fetch_calls if call[0].startswith(
+            "https://www.tiktok.com/search"
+        )
+    )
     discover_call = next(
         call for call in reader.fetch_calls if call[0].startswith(
             "https://www.tiktok.com/discover"
@@ -425,6 +430,7 @@ def test_tiktok_search_error_falls_back_to_discover():
     detail_call = next(
         call for call in reader.fetch_calls if "/video/" in call[0]
     )
+    assert search_call[1]["settle_ms"] == 5_000
     assert discover_call[1]["settle_ms"] == 10_000
     assert detail_call[1]["settle_ms"] == 5_000
 
