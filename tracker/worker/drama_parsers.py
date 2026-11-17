@@ -352,15 +352,138 @@ def parse_tiktok_video(html: str, video_id: str | None = None) -> VideoRecord | 
     )
 
 
-def parse_youtube_video(html: str) -> VideoRecord | None:
-    player = _assigned_json(html, "ytInitialPlayerResponse")
-    if not player:
+def _youtube_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    simple = value.get("simpleText")
+    if isinstance(simple, str):
+        return simple.strip()
+    runs = value.get("runs")
+    if isinstance(runs, list):
+        return "".join(
+            str(run.get("text", ""))
+            for run in runs
+            if isinstance(run, dict)
+        ).strip()
+    return ""
+
+
+def _youtube_date(value: Any) -> str | None:
+    parsed = _iso_utc(value)
+    if parsed:
+        return parsed
+    if not isinstance(value, str):
         return None
+    text = re.sub(
+        r"^(?:premiered|streamed live on|started streaming on)\s+",
+        "",
+        value.strip(),
+        flags=re.IGNORECASE,
+    )
+    for pattern in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            date = datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+        return date.replace(tzinfo=timezone.utc).isoformat()
+    return None
+
+
+def _youtube_video_id(html: str, *values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
+            return value
+    for pattern in (
+        r'<link[^>]+href="[^"]*(?:watch\?v=|shorts/)([A-Za-z0-9_-]{11})',
+        r'<meta[^>]+content="[^"]*(?:watch\?v=|shorts/)([A-Za-z0-9_-]{11})',
+        r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"',
+    ):
+        match = re.search(pattern, html, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _youtube_initial_data_record(
+    html: str,
+    video_id: str | None,
+) -> VideoRecord | None:
+    data = _assigned_json(html, "ytInitialData")
+    if not data:
+        return None
+
+    primary: dict = {}
+    secondary: dict = {}
+    for node in walk_json(data):
+        if not isinstance(node, dict):
+            continue
+        candidate = node.get("videoPrimaryInfoRenderer")
+        if not primary and isinstance(candidate, dict):
+            primary = candidate
+        candidate = node.get("videoSecondaryInfoRenderer")
+        if not secondary and isinstance(candidate, dict):
+            secondary = candidate
+        if primary and secondary:
+            break
+    if not primary:
+        return None
+
+    view_renderer = primary.get("viewCount")
+    if isinstance(view_renderer, dict):
+        view_renderer = view_renderer.get("videoViewCountRenderer")
+    if not isinstance(view_renderer, dict):
+        view_renderer = {}
+    views = _int_value(view_renderer.get("originalViewCount"))
+    if views is None:
+        views = _int_value(_youtube_text(view_renderer.get("viewCount")))
+
+    owner = secondary.get("owner")
+    if isinstance(owner, dict):
+        owner = owner.get("videoOwnerRenderer")
+    if not isinstance(owner, dict):
+        owner = {}
+    creator = _youtube_text(owner.get("title")) or None
+
+    role = video_id or _youtube_video_id(
+        html,
+        owner.get("channelId"),
+    )
+    title = _youtube_text(primary.get("title"))
+    if not role or not title:
+        return None
+    return VideoRecord(
+        video_id=role,
+        title=title,
+        creator=creator,
+        published_at=_youtube_date(_youtube_text(primary.get("dateText"))),
+        views=views,
+        likes=_youtube_like_count(html, {}),
+        comments=None,
+        shares=None,
+    )
+
+
+def parse_youtube_video(
+    html: str,
+    video_id: str | None = None,
+) -> VideoRecord | None:
+    player = _assigned_json(html, "ytInitialPlayerResponse")
+    if not isinstance(player, dict):
+        player = {}
     details = player.get("videoDetails")
     if not isinstance(details, dict):
-        return None
-    video_id = str(details.get("videoId") or "")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        details = {}
+    fallback = _youtube_initial_data_record(html, video_id)
+
+    record_id = _youtube_video_id(
+        html,
+        details.get("videoId"),
+        video_id,
+        fallback.video_id if fallback else None,
+    )
+    if not record_id:
         return None
     microformat = player.get("microformat")
     if not isinstance(microformat, dict):
@@ -368,13 +491,29 @@ def parse_youtube_video(html: str) -> VideoRecord | None:
     renderer = microformat.get("playerMicroformatRenderer")
     if not isinstance(renderer, dict):
         renderer = {}
+    title = str(details.get("title") or (fallback.title if fallback else ""))
+    if not title:
+        return None
     like_count = _youtube_like_count(html, renderer)
+    if like_count is None and fallback:
+        like_count = fallback.likes
     return VideoRecord(
-        video_id=video_id,
-        title=str(details.get("title") or ""),
-        creator=str(details.get("author") or details.get("channelId") or "") or None,
-        published_at=_iso_utc(renderer.get("publishDate")),
-        views=_int_value(details.get("viewCount")),
+        video_id=record_id,
+        title=title,
+        creator=str(
+            details.get("author")
+            or details.get("channelId")
+            or (fallback.creator if fallback else "")
+        ) or None,
+        published_at=(
+            _iso_utc(renderer.get("publishDate"))
+            or (fallback.published_at if fallback else None)
+        ),
+        views=(
+            _int_value(details.get("viewCount"))
+            if details.get("viewCount") is not None
+            else (fallback.views if fallback else None)
+        ),
         likes=like_count,
         comments=None,
         shares=None,

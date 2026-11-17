@@ -675,7 +675,7 @@ async def collect_research(
             url = candidate.page_url
             try:
                 snapshot = await page_reader.fetch(url, settle_ms=1_000)
-                record = parse_youtube_video(snapshot.html)
+                record = parse_youtube_video(snapshot.html, candidate.video_id)
             except Exception:
                 record = None
             if not record:

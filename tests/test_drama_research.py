@@ -94,6 +94,50 @@ def _youtube_detail(
     )
 
 
+def _youtube_login_required_detail() -> str:
+    player = {
+        "playabilityStatus": {
+            "status": "LOGIN_REQUIRED",
+            "reason": "Sign in to confirm you're not a bot",
+        }
+    }
+    initial = {
+        "contents": {
+            "videoPrimaryInfoRenderer": {
+                "title": {
+                    "runs": [
+                        {
+                            "text": (
+                                "I Got Three Girlfriends From the System "
+                                "- Episode 3"
+                            )
+                        }
+                    ]
+                },
+                "viewCount": {
+                    "videoViewCountRenderer": {
+                        "originalViewCount": "46049",
+                        "viewCount": {"simpleText": "46,049 views"},
+                    }
+                },
+                "dateText": {"simpleText": "Oct 19, 2026"},
+            },
+            "videoSecondaryInfoRenderer": {
+                "owner": {
+                    "videoOwnerRenderer": {
+                        "title": {"runs": [{"text": "Kitty Motty"}]}
+                    }
+                }
+            },
+        },
+        "engagementPanels": [{"likeCount": "219"}],
+    }
+    return (
+        f"<script>var ytInitialPlayerResponse = {json.dumps(player)};</script>"
+        f"<script>var ytInitialData = {json.dumps(initial)};</script>"
+    )
+
+
 def test_tiktok_and_youtube_search_parsers_extract_video_ids():
     tiktok_html = """
     <a href="https://www.tiktok.com/@creator/video/7200000000000000001">one</a>
@@ -147,6 +191,17 @@ def test_video_pages_yield_all_public_counters_that_are_exposed():
     assert youtube.creator == "Drama Channel"
     assert (youtube.views, youtube.likes) == (98765, 12_000)
     assert youtube.published_at.startswith("2026-11-01")
+
+    fallback = parse_youtube_video(
+        _youtube_login_required_detail(),
+        "abcdefghijk",
+    )
+    assert fallback is not None
+    assert fallback.video_id == "abcdefghijk"
+    assert fallback.title.endswith("Episode 3")
+    assert fallback.creator == "Kitty Motty"
+    assert (fallback.views, fallback.likes) == (46049, 219)
+    assert fallback.published_at.startswith("2026-10-19")
 
     continuation = youtube_comment_continuation(_youtube_detail())
     assert continuation is not None
@@ -285,6 +340,38 @@ def test_collector_filters_youtube_results_without_a_title_match():
         search["platform"] == "google" and search["status"] == "ok"
         for search in result["collection"]["searches"]
     )
+
+
+class _LoginRequiredYouTubeReader:
+    async def fetch(self, url: str, **_kwargs):
+        if url.startswith("https://www.tiktok.com"):
+            html = "No results found"
+        elif url.startswith("https://www.youtube.com/results"):
+            html = '<a href="https://www.youtube.com/shorts/abcdefghijk">result</a>'
+        elif url == "https://www.youtube.com/watch?v=abcdefghijk":
+            html = _youtube_login_required_detail()
+        else:
+            raise AssertionError(url)
+        return drama_collector.PageSnapshot(html=html, final_url=url, status=200)
+
+    async def youtube_comment_count(self, _html: str, _region: str):
+        return None
+
+
+def test_collector_uses_public_initial_data_when_youtube_requires_login():
+    result = asyncio.run(
+        drama_collector.collect_research(
+            "I Got Three Girlfriends From the System",
+            [],
+            "US",
+            reader=_LoginRequiredYouTubeReader(),
+        )
+    )
+    assert result["summary"]["google"]["video_count"] == 1
+    assert result["summary"]["google"]["views"] == 46049
+    assert result["summary"]["google"]["likes"] == 219
+    assert result["sources"][0]["video_id"] == "abcdefghijk"
+    assert result["sources"][0]["creator"] == "Kitty Motty"
 
 
 class _TikTokSearchErrorReader:
