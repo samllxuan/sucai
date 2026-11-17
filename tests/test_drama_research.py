@@ -375,7 +375,11 @@ def test_collector_uses_public_initial_data_when_youtube_requires_login():
 
 
 class _TikTokSearchErrorReader:
+    def __init__(self):
+        self.fetch_calls: list[tuple[str, dict]] = []
+
     async def fetch(self, url: str, **_kwargs):
+        self.fetch_calls.append((url, _kwargs))
         if url.startswith("https://www.tiktok.com/search"):
             html = "Something went wrong with the server"
         elif url.startswith("https://www.tiktok.com/discover"):
@@ -396,12 +400,13 @@ class _TikTokSearchErrorReader:
 
 
 def test_tiktok_search_error_falls_back_to_discover():
+    reader = _TikTokSearchErrorReader()
     result = asyncio.run(
         drama_collector.collect_research(
             "I Got Three Girlfriends From the System",
             [],
             "US",
-            reader=_TikTokSearchErrorReader(),
+            reader=reader,
         )
     )
     assert result["status"] == "partial"
@@ -412,6 +417,16 @@ def test_tiktok_search_error_falls_back_to_discover():
         search["platform"] == "tiktok" and search["status"] == "ok"
         for search in result["collection"]["searches"]
     )
+    discover_call = next(
+        call for call in reader.fetch_calls if call[0].startswith(
+            "https://www.tiktok.com/discover"
+        )
+    )
+    detail_call = next(
+        call for call in reader.fetch_calls if "/video/" in call[0]
+    )
+    assert discover_call[1]["settle_ms"] == 10_000
+    assert detail_call[1]["settle_ms"] == 5_000
 
 
 def test_api_validates_aliases_and_returns_polling_contract():

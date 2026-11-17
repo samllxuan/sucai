@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 MAX_RESULTS_PER_PLATFORM = 40
 RESEARCH_TIME_BUDGET_SECONDS = 10 * 60
+TIKTOK_DISCOVER_SETTLE_MS = 10_000
+TIKTOK_VIDEO_SETTLE_MS = 5_000
 MIN_REQUEST_INTERVAL_SECONDS = {
     "tiktok": 2.5,
     "google": 2.0,
@@ -525,7 +527,7 @@ async def collect_research(
                 try:
                     discover = await page_reader.fetch(
                         discover_url,
-                        settle_ms=1_000,
+                        settle_ms=TIKTOK_DISCOVER_SETTLE_MS,
                         scrolls=2,
                     )
                     links = tiktok_video_links(discover.html)
@@ -582,7 +584,10 @@ async def collect_research(
                 break
             url = candidate.page_url
             try:
-                snapshot = await page_reader.fetch(url, settle_ms=1_200)
+                snapshot = await page_reader.fetch(
+                    url,
+                    settle_ms=TIKTOK_VIDEO_SETTLE_MS,
+                )
                 record = parse_tiktok_video(snapshot.html, candidate.video_id)
             except Exception:
                 record = None
