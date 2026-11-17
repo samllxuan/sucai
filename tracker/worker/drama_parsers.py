@@ -1,4 +1,4 @@
-"""Parsers for anonymous TikTok, Google Short Videos and YouTube pages."""
+"""Parsers for anonymous TikTok, YouTube search and YouTube video pages."""
 
 from __future__ import annotations
 
@@ -215,13 +215,6 @@ def youtube_search_url(query: str, region: str) -> str:
     )
 
 
-def google_short_video_url(query: str, region: str) -> str:
-    return (
-        "https://www.google.com/search?q="
-        f"{quote('\"' + query + '\" youtube')}&udm=short_vids&hl=en&gl={region.lower()}"
-    )
-
-
 def tiktok_search_url(query: str, region: str) -> str:
     return f"https://www.tiktok.com/search?q={quote(query)}&region={region}"
 
@@ -230,7 +223,7 @@ def tiktok_discover_url(query: str) -> str:
     return f"https://www.tiktok.com/discover/{quote(discover_slug(query), safe='-')}"
 
 
-def google_page_is_explicitly_empty(html: str) -> bool:
+def youtube_page_is_explicitly_empty(html: str) -> bool:
     text = unescape(html).casefold()
     return any(
         marker in text
@@ -238,16 +231,25 @@ def google_page_is_explicitly_empty(html: str) -> bool:
             "did not match any documents",
             "no results found",
             "your search did not match",
+            "noresultsrenderer",
         )
     )
 
 
-def google_page_is_blocked(html: str, final_url: str = "") -> bool:
-    text = unescape(html).casefold()
+def youtube_page_is_blocked(html: str, final_url: str = "") -> bool:
+    text = re.sub(
+        r"<(script|style)\b[^>]*>.*?</\1\s*>",
+        " ",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = unescape(re.sub(r"<[^>]+>", " ", text)).casefold()
     return (
         "/sorry/" in final_url.casefold()
         or "our systems have detected unusual traffic" in text
         or "unusual traffic from your computer network" in text
+        or "sign in to confirm you're not a bot" in text
+        or "verify you're not a robot" in text
     )
 
 

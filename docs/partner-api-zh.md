@@ -28,7 +28,7 @@ curl -X POST "https://l2.divinlove.com/api/v1/searches" \
 
 状态 `queued` 排队中、`running` 采集中、`completed` 有结果、`no_results` 本轮无结果、`failed` 失败。完成时 `results.cards` 为本次采集命中的广告记录，包括之前已存在的记录，支持从 0 开始的 `page`。记录中的 `id` 可用于调用素材详情接口。`partial: true` 表示分页、采集或后处理不完整。`no_results` 不代表 Meta 没有投放。任务失败或采集服务重启后需重新提交；不要将失败当成零结果。建议每 10–30 秒查询一次。
 
-## 调研剧目在 TikTok、Google 短视频和 YouTube 的公开表现
+## 调研剧目在 TikTok 和 YouTube 的公开表现
 
 `POST /api/v1/drama-research`
 
@@ -53,7 +53,7 @@ curl -X POST "https://l2.divinlove.com/api/v1/searches" \
     "phase": "finished",
     "summary": {
       "tiktok": {"status": "complete", "video_count": 12, "views": 1234567, "likes": 98765, "comments": 4321, "shares": 678, "creator_count": 8},
-      "google": {"status": "complete", "content_platform": "youtube", "discovery": "google_short_videos", "video_count": 7, "views": 765432, "likes": 45678, "comments": 2100, "shares": null, "creator_count": 5},
+      "google": {"status": "complete", "content_platform": "youtube", "discovery": "youtube_search", "video_count": 7, "views": 765432, "likes": 45678, "comments": 2100, "shares": null, "creator_count": 5},
       "combined": {"platforms": ["google", "tiktok"], "video_count": 19, "views": 2000000, "likes": 144443, "comments": 6421, "shares": 678}
     },
     "collection": {"regions": ["GB", "US"], "region_count": 2, "captured_at": "2026-11-16T10:00:00+00:00", "warnings": [], "limits": {"max_videos_per_platform": 40, "time_budget_seconds": 600}},
@@ -64,16 +64,15 @@ curl -X POST "https://l2.divinlove.com/api/v1/searches" \
 
 `drama_research.summary` 只返回所有国家的累计汇总数值，不含逐视频 `sources`、账号 `creators` 或搜索记录数组。同一视频在多个国家结果中出现时，按 `platform + video_id` 只计一次；播放、点赞、评论、分享分别取已采集到的最大值。因此重复采集、跨国家重复命中、样本变少或平台计数短暂回退都不会把已有统计改小。`collection.regions` 是已落库的国家列表，`captured_at` 取最近一次采集时间，`warnings` 合并各地区警告，`limits` 合并采集限制。
 
-任务状态为 `queued`、`running`、`completed`、`partial`、`no_results` 或 `failed`；`phase` 依次可能为 `tiktok_discovery`、`tiktok_videos`、`google_discovery`、`youtube_videos`、`summarizing`。`partial` 表示至少拿到一部分视频，但某次搜索、视频详情或样本上限使结果不完整；`no_results` 只用于搜索页明确表示无结果；访问被限制或页面结构变化属于失败，不会伪报为零。
+任务状态为 `queued`、`running`、`completed`、`partial`、`no_results` 或 `failed`；`phase` 依次可能为 `tiktok_discovery`、`tiktok_videos`、`youtube_discovery`、`youtube_videos`、`summarizing`。`partial` 表示至少拿到一部分视频，但某次搜索、视频详情或样本上限使结果不完整；`no_results` 用于搜索页明确表示无结果，或候选视频标题均不匹配剧名/别名；访问被限制或页面结构变化属于失败，不会伪报为零。
 
 需要逐条排查视频来源时，可另外用公开接口 `GET /api/v1/drama-research/{job_id}` 查询完整详情；日常任务轮询只使用 summary。
 
 采集逻辑：
 
 - TikTok：按剧名和别名打开匿名搜索页，搜索页无视频卡片时再尝试对应 Discover 话题页；收集视频 URL 后逐条读取视频页公开指标。
-- Google：使用 Google Short Videos 搜索 `"别名" youtube`，从结果中提取 YouTube 视频；不使用 Google Ads Transparency Center，也不把普通搜索结果伪装成“广告投放”。
-- YouTube：逐条打开公开视频页，读取播放、点赞和可获得的评论数。Google 结果本身不是广告库，因此 `earliest_published_at` 是视频公开发布时间，不是首次投放时间。
-- 全程串行访问，同一域名请求之间至少间隔：TikTok 2.5 秒、Google 2 秒、YouTube 1.25 秒。遇到 `429`、`500`、`502`、`503`、`504` 时最多重试 2 次，并按 `Retry-After` 或 5/10 秒指数退避；连续失败会转成 `partial`/`failed`，不会继续制造请求高峰。
+- YouTube：直接使用 YouTube 搜索页精确短语搜索 `"别名"`，从搜索结果中提取视频并逐条打开公开详情页，读取播放、点赞和可获得的评论数；标题必须包含剧名或别名，避免把搜索页中的推荐视频计入。不使用 Google 搜索页解析，也不使用 Google Ads Transparency Center，更不把普通搜索结果伪装成“广告投放”。`summary.google` 是历史兼容字段名，`content_platform` 为 `youtube`，`discovery` 为 `youtube_search`。`earliest_published_at` 是视频公开发布时间，不是首次投放时间。
+- 全程串行访问，同一域名请求之间至少间隔：TikTok 2.5 秒、YouTube 1.25 秒。遇到 `429`、`500`、`502`、`503`、`504` 时最多重试 2 次，并按 `Retry-After` 或 5/10 秒指数退避；连续失败会转成 `partial`/`failed`，不会继续制造请求高峰。
 
 完整详情的主要结构：
 
@@ -99,7 +98,7 @@ curl -X POST "https://l2.divinlove.com/api/v1/searches" \
     "google": {
       "status": "complete",
       "content_platform": "youtube",
-      "discovery": "google_short_videos",
+      "discovery": "youtube_search",
       "video_count": 7,
       "views": 765432,
       "likes": 45678,

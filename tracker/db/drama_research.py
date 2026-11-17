@@ -1,4 +1,4 @@
-"""Durable state for public TikTok and Google/YouTube drama research."""
+"""Durable state for public TikTok and YouTube drama research."""
 
 from __future__ import annotations
 
@@ -459,7 +459,7 @@ def get_summary(query: str) -> dict | None:
         bool(google),
     )
     google_summary["content_platform"] = "youtube"
-    google_summary["discovery"] = "google_short_videos"
+    google_summary["discovery"] = "youtube_search"
     combined = _summary_for(sources)
     combined["platforms"] = sorted({row["platform"] for row in sources})
     status, phase = _combined_state(subjects)

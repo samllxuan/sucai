@@ -13,13 +13,15 @@ from fastapi.testclient import TestClient
 from tracker.db import drama_research as drama_research_db
 from tracker.worker import drama_collector
 from tracker.worker.drama_parsers import (
-    google_page_is_explicitly_empty,
+    matches_aliases,
     parse_tiktok_video,
     parse_youtube_comment_count,
     parse_youtube_video,
     tiktok_page_has_server_error,
     tiktok_video_links,
     youtube_comment_continuation,
+    youtube_page_is_explicitly_empty,
+    youtube_search_url,
     youtube_video_ids,
 )
 from tracker.web.routes import drama_research_api
@@ -61,11 +63,13 @@ def _tiktok_detail() -> str:
     )
 
 
-def _youtube_detail() -> str:
+def _youtube_detail(
+    title: str = "I Got Three Girlfriends From the System #3",
+) -> str:
     player = {
         "videoDetails": {
             "videoId": "abcdefghijk",
-            "title": "Three Girlfriends From the System #3",
+            "title": title,
             "author": "Drama Channel",
             "viewCount": "98765",
         },
@@ -90,7 +94,7 @@ def _youtube_detail() -> str:
     )
 
 
-def test_tiktok_and_google_search_parsers_extract_video_ids():
+def test_tiktok_and_youtube_search_parsers_extract_video_ids():
     tiktok_html = """
     <a href="https://www.tiktok.com/@creator/video/7200000000000000001">one</a>
     <script>{"videoId":"7200000000000000002"}</script>
@@ -100,12 +104,24 @@ def test_tiktok_and_google_search_parsers_extract_video_ids():
         "7200000000000000002": "https://www.tiktok.com/video/7200000000000000002",
     }
 
-    google_html = """
+    youtube_html = """
     <a href="https://www.youtube.com/shorts/abcdefghijk?feature=share">one</a>
     <a href="/url?q=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dlmnopqrstuv">two</a>
     """
-    assert youtube_video_ids(google_html) == ["abcdefghijk", "lmnopqrstuv"]
-    assert google_page_is_explicitly_empty("Your search did not match any documents.")
+    assert youtube_video_ids(youtube_html) == ["abcdefghijk", "lmnopqrstuv"]
+    assert youtube_page_is_explicitly_empty("Your search did not match any documents.")
+    assert youtube_page_is_explicitly_empty("No results found")
+    assert (
+        youtube_search_url("Three Girlfriends From the System", "US")
+        == "https://www.youtube.com/results?search_query="
+        "%22Three%20Girlfriends%20From%20the%20System%22"
+        "&sp=EgIYAQ%253D%253D&hl=en&gl=US"
+    )
+    assert matches_aliases(
+        ["Three Girlfriends From the System #3"],
+        ["Three Girlfriends From the System"],
+    )
+    assert not matches_aliases(["An unrelated drama"], ["Three Girlfriends From the System"])
     assert tiktok_page_has_server_error("Something went wrong. Try again.")
     assert not tiktok_page_has_server_error(
         '<script>{"error":"Something went wrong"}</script><main>Videos</main>'
@@ -164,7 +180,7 @@ class _FakeReader:
             )
         elif url == "https://www.tiktok.com/@drama/video/7200000000000000001":
             html = _tiktok_detail()
-        elif url.startswith("https://www.google.com/search"):
+        elif url.startswith("https://www.youtube.com/results"):
             html = '<a href="https://www.youtube.com/shorts/abcdefghijk">result</a>'
         elif url == "https://www.youtube.com/watch?v=abcdefghijk":
             html = _youtube_detail()
@@ -198,6 +214,10 @@ def test_collector_returns_aggregates_and_traceable_sources():
     assert result["summary"]["google"]["earliest_published_at"].startswith("2026-11-01")
     assert result["summary"]["combined"]["views"] == 222221
     assert {item["platform"] for item in result["sources"]} == {"tiktok", "google"}
+    assert result["summary"]["google"]["discovery"] == "youtube_search"
+    assert result["summary"]["google"]["content_platform"] == "youtube"
+    assert any(url.startswith("https://www.youtube.com/results") for url in reader.urls)
+    assert not any("google.com/search" in url for url in reader.urls)
     assert result["collection"]["limits"]["serial_per_domain"] is True
 
 
@@ -223,6 +243,50 @@ def test_collector_distinguishes_known_empty_from_failure():
     assert result["sources"] == []
 
 
+class _FilteredYouTubeReader:
+    def __init__(self):
+        self.comment_calls = 0
+
+    async def fetch(self, url: str, **_kwargs):
+        if url.startswith("https://www.tiktok.com"):
+            html = "No results found"
+        elif url.startswith("https://www.youtube.com/results"):
+            html = '<a href="https://www.youtube.com/shorts/abcdefghijk">result</a>'
+        elif url == "https://www.youtube.com/watch?v=abcdefghijk":
+            html = _youtube_detail("Unrelated Drama")
+        else:
+            raise AssertionError(url)
+        return drama_collector.PageSnapshot(html=html, final_url=url, status=200)
+
+    async def youtube_comment_count(self, _html: str, _region: str):
+        self.comment_calls += 1
+        return None
+
+
+def test_collector_filters_youtube_results_without_a_title_match():
+    phases: list[str] = []
+    reader = _FilteredYouTubeReader()
+    result = asyncio.run(
+        drama_collector.collect_research(
+            "I Got Three Girlfriends From the System",
+            [],
+            "US",
+            reader=reader,
+            on_phase=phases.append,
+        )
+    )
+    assert "youtube_discovery" in phases
+    assert result["status"] == "no_results"
+    assert result["summary"]["google"]["status"] == "empty"
+    assert result["summary"]["google"]["video_count"] == 0
+    assert result["sources"] == []
+    assert reader.comment_calls == 0
+    assert any(
+        search["platform"] == "google" and search["status"] == "ok"
+        for search in result["collection"]["searches"]
+    )
+
+
 class _TikTokSearchErrorReader:
     async def fetch(self, url: str, **_kwargs):
         if url.startswith("https://www.tiktok.com/search"):
@@ -234,7 +298,7 @@ class _TikTokSearchErrorReader:
             )
         elif url == "https://www.tiktok.com/@drama/video/7200000000000000001":
             html = _tiktok_detail()
-        elif url.startswith("https://www.google.com/search"):
+        elif url.startswith("https://www.youtube.com/results"):
             html = "Your search did not match any documents."
         else:
             raise AssertionError(url)

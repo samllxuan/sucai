@@ -1,4 +1,4 @@
-"""Collect anonymous TikTok and Google Short Videos drama performance data.
+"""Collect anonymous TikTok and YouTube drama performance data.
 
 The collector is deliberately serial. Search pages provide candidate video IDs;
 each candidate is then opened once to read its public counters. Requests to the
@@ -20,9 +20,7 @@ from urllib.parse import unquote, urlsplit
 
 from .drama_parsers import (
     VideoRecord,
-    google_page_is_blocked,
-    google_page_is_explicitly_empty,
-    google_short_video_url,
+    matches_aliases,
     parse_tiktok_video,
     parse_youtube_comment_count,
     parse_youtube_video,
@@ -33,6 +31,9 @@ from .drama_parsers import (
     tiktok_search_url,
     tiktok_video_links,
     youtube_comment_continuation,
+    youtube_page_is_blocked,
+    youtube_page_is_explicitly_empty,
+    youtube_search_url,
     youtube_video_ids,
 )
 
@@ -422,12 +423,13 @@ def _platform_status(
     errors: int,
     empty: int,
     truncated: bool,
+    filtered: int = 0,
 ) -> str:
     if sources:
         return "partial" if errors or truncated else "complete"
     if errors:
         return "failed"
-    if empty:
+    if empty or filtered:
         return "empty"
     return "failed"
 
@@ -452,7 +454,12 @@ async def collect_research(
     page_reader = reader or BrowserPageReader(os.environ.get("TIKTOK_PROXY") or None)
     outcomes = {
         "tiktok": {"errors": 0, "empty": 0, "truncated": False},
-        "google": {"errors": 0, "empty": 0, "truncated": False},
+        "google": {
+            "errors": 0,
+            "empty": 0,
+            "filtered": 0,
+            "truncated": False,
+        },
     }
 
     def elapsed_expired() -> bool:
@@ -585,21 +592,24 @@ async def collect_research(
                 continue
             captures.append(_record_source("tiktok", record, candidate, url))
 
-        # Google Short Videos return YouTube content. Each YouTube page supplies
-        # exact view counts, and the public comments continuation supplies comments
-        # when the page exposes one.
-        _phase(on_phase, "google_discovery")
+        # YouTube search is the discovery source. The public summary keeps the
+        # historical "google" key for API compatibility.
+        _phase(on_phase, "youtube_discovery")
         google_candidates: dict[str, Candidate] = {}
         for alias in aliases:
             if elapsed_expired():
                 outcomes["google"]["errors"] += 1
                 break
-            query_url = google_short_video_url(alias, region)
+            query_url = youtube_search_url(alias, region)
             try:
-                snapshot = await page_reader.fetch(query_url, settle_ms=1_200, scrolls=3)
+                snapshot = await page_reader.fetch(
+                    query_url,
+                    settle_ms=1_500,
+                    scrolls=3,
+                )
             except PageFetchError:
                 outcomes["google"]["errors"] += 1
-                _warning(warnings, "Google 部分短视频搜索页读取失败")
+                _warning(warnings, "YouTube 部分搜索页读取失败")
                 searches.append(
                     {
                         "platform": "google",
@@ -610,9 +620,9 @@ async def collect_research(
                     }
                 )
                 continue
-            if google_page_is_blocked(snapshot.html, snapshot.final_url):
+            if youtube_page_is_blocked(snapshot.html, snapshot.final_url):
                 outcomes["google"]["errors"] += 1
-                _warning(warnings, "Google 返回流量验证页，未把该页当作空结果")
+                _warning(warnings, "YouTube 搜索页返回验证页，未把该页当作空结果")
                 searches.append(
                     {
                         "platform": "google",
@@ -634,13 +644,13 @@ async def collect_research(
                 )
             if video_ids:
                 status = "ok"
-            elif google_page_is_explicitly_empty(snapshot.html):
+            elif youtube_page_is_explicitly_empty(snapshot.html):
                 outcomes["google"]["empty"] += 1
                 status = "empty"
             else:
                 outcomes["google"]["errors"] += 1
                 status = "failed"
-                _warning(warnings, "Google 搜索页无可解析 YouTube 视频，且不能确认是空结果")
+                _warning(warnings, "YouTube 搜索页无可解析视频，且不能确认是空结果")
             searches.append(
                 {
                     "platform": "google",
@@ -656,7 +666,7 @@ async def collect_research(
             len(google_candidates) > MAX_RESULTS_PER_PLATFORM
         )
         if outcomes["google"]["truncated"]:
-            _warning(warnings, "Google 候选视频超过 40 条，仅读取前 40 条样本")
+            _warning(warnings, "YouTube 候选视频超过 40 条，仅读取前 40 条样本")
         _phase(on_phase, "youtube_videos")
         for candidate in google_selected:
             if elapsed_expired():
@@ -666,22 +676,31 @@ async def collect_research(
             try:
                 snapshot = await page_reader.fetch(url, settle_ms=1_000)
                 record = parse_youtube_video(snapshot.html)
-                if record:
-                    try:
-                        comments = await page_reader.youtube_comment_count(
-                            snapshot.html,
-                            region,
-                        )
-                    except Exception:
-                        comments = None
-                    if comments is not None:
-                        record.comments = comments
             except Exception:
                 record = None
             if not record:
                 outcomes["google"]["errors"] += 1
                 _warning(warnings, "部分 YouTube 视频页未返回可验证的公开指标")
                 continue
+            matched = [
+                alias
+                for alias in aliases
+                if matches_aliases([record.title], [alias])
+            ]
+            if not matched:
+                outcomes["google"]["filtered"] += 1
+                _warning(warnings, "部分 YouTube 搜索结果与剧名、别名不匹配，已排除")
+                continue
+            candidate.aliases = set(matched)
+            try:
+                comments = await page_reader.youtube_comment_count(
+                    snapshot.html,
+                    region,
+                )
+            except Exception:
+                comments = None
+            if comments is not None:
+                record.comments = comments
             captures.append(_record_source("google", record, candidate, url))
     finally:
         if owned_reader:
@@ -704,9 +723,10 @@ async def collect_research(
         outcomes["google"]["errors"],
         outcomes["google"]["empty"],
         outcomes["google"]["truncated"],
+        outcomes["google"]["filtered"],
     )
     google_summary["content_platform"] = "youtube"
-    google_summary["discovery"] = "google_short_videos"
+    google_summary["discovery"] = "youtube_search"
 
     if captures and tiktok_summary["status"] == "complete" and google_summary["status"] == "complete":
         status = "completed"
